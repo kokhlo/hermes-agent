@@ -125,6 +125,21 @@ def _display_word(key: str, default: str, allowed) -> str:
     return raw if raw in allowed else default
 
 
+def _cfg_json_safe(value):
+    """PyYAML parses unquoted ``2026-08-17T14:50:10Z`` / ``2026-12-31`` scalars as date/datetime;
+    the transports serialize responses with plain ``json.dumps``, so they must become ISO-8601
+    text before leaving the config getter (a raw datetime kills the TUI child with a TypeError)."""
+    from datetime import date, datetime
+
+    if isinstance(value, dict):
+        return {k: _cfg_json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_cfg_json_safe(v) for v in value]
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return value
+
+
 _THINKING_MODES = frozenset({"collapsed", "truncated", "full"})
 
 
@@ -200,7 +215,7 @@ _CONFIG_GETTERS = {
     "provider": _cfg_get_provider,
     "profile": lambda params: {"home": str(_hermes_home), "display": _display_hermes_home()},
     "project": _cfg_get_project,
-    "full": lambda params: {"config": _load_cfg()},
+    "full": lambda params: {"config": _cfg_json_safe(_load_cfg())},
     "prompt": lambda params: {"prompt": _load_cfg().get("custom_prompt", "")},
     "skin": lambda params: {"value": _display_raw().get("skin", "default")},
     # Normalised like the TUI renders it (frontend falls back to the default for the same inputs).
