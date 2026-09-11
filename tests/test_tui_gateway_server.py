@@ -9027,6 +9027,25 @@ def test_setup_runtime_check_allows_no_key_custom_runtime(monkeypatch):
     assert resp["result"]["provider"] == "custom"
 
 
+def test_setup_runtime_check_allows_local_api_key_custom(monkeypatch):
+    """Custom providers with api_key: local (llama.cpp, Ollama) are accepted."""
+    monkeypatch.setattr("hermes_cli.main._has_any_provider_configured", lambda **_kw: True)
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda requested=None: {
+            "provider": "custom:llama.cpp",
+            "api_key": "local",
+            "model": "meta-llama-3.1-8b-instruct.Q4_K_M.gguf",
+            "source": "config.yaml",
+        },
+    )
+
+    resp = server.handle_request({"id": "1", "method": "setup.runtime_check", "params": {}})
+
+    assert resp["result"]["ok"] is True
+    assert resp["result"]["provider"] == "custom:llama.cpp"
+
+
 def test_setup_runtime_check_rejects_implicit_bedrock_when_unconfigured(monkeypatch):
     monkeypatch.setattr("hermes_cli.main._has_any_provider_configured", lambda **_kw: False)
     monkeypatch.setattr(

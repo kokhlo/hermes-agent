@@ -302,7 +302,7 @@ def _(rid, params: dict) -> dict:
                 return fail("No Hermes provider is configured.", source)
             api_key = runtime.get("api_key")
             api_key_text = "" if callable(api_key) else str(api_key or "").strip()
-            if not (callable(api_key) or api_key_text in {"aws-sdk", "no-key-required"}
+            if not (callable(api_key) or api_key_text in {"aws-sdk", "no-key-required", "local"}
                     or has_usable_secret(api_key_text) or bool(runtime.get("command"))):
                 return fail(f"No usable credentials found for {provider}.", runtime.get("source"))
             return {"ok": True, "provider": runtime.get("provider"), "model": runtime.get("model"),
