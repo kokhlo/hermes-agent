@@ -12,7 +12,10 @@ def test_resolve_uses_named_personality_when_set():
             "personalities": {"helpful": "You are helpful."},
         },
     }
-    assert resolve_ephemeral_system_prompt_from_config(cfg) == "You are helpful."
+    assert (
+        resolve_ephemeral_system_prompt_from_config(cfg)
+        == "manual forever\n\nYou are helpful."
+    )
 
 def test_resolve_falls_back_to_manual_system_prompt():
     cfg = {
@@ -52,3 +55,27 @@ def test_resolve_renders_dict_personality():
     assert "You are an expert programmer." in resolved
     assert "Tone: technical" in resolved
     assert "Style: concise" in resolved
+
+def test_resolve_composes_list_form_manual_prompt_first():
+    cfg = {
+        "display": {"personality": "helpful"},
+        "agent": {
+            "system_prompt": ["line one", "line two"],
+            "personalities": {"helpful": "You are helpful."},
+        },
+    }
+    assert (
+        resolve_ephemeral_system_prompt_from_config(cfg)
+        == "line one\nline two\n\nYou are helpful."
+    )
+
+def test_resolve_orders_manual_prompt_before_personality():
+    cfg = {
+        "display": {"personality": "helpful"},
+        "agent": {
+            "system_prompt": "manual forever",
+            "personalities": {"helpful": "You are helpful."},
+        },
+    }
+    resolved = resolve_ephemeral_system_prompt_from_config(cfg)
+    assert resolved.index("manual forever") < resolved.index("You are helpful.")

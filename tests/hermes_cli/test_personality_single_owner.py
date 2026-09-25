@@ -77,10 +77,17 @@ def test_resolve_personality_unknown_raises():
         resolve_personality("doesnotexist", {})
 
 
-def test_resolve_overlay_personality_wins_over_manual_prompt():
+def test_resolve_overlay_composes_manual_prompt_with_personality():
     cfg = {
         "display": {"personality": "kawaii"},
         "agent": {"system_prompt": "manual forever"},
+    }
+    assert resolve_ephemeral_system_prompt(cfg) == f"manual forever\n\n{KAWAII}"
+
+
+def test_resolve_overlay_personality_only_unchanged():
+    cfg = {
+        "display": {"personality": "kawaii"},
     }
     assert resolve_ephemeral_system_prompt(cfg) == KAWAII
 

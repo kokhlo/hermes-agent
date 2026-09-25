@@ -116,12 +116,17 @@ def active_personality_name(cfg: Optional[Dict[str, Any]]) -> str:
 
 
 def resolve_ephemeral_system_prompt(cfg: Optional[Dict[str, Any]]) -> str:
-    """Session overlay: ``display.personality`` when it names a known personality, else the
-    user-owned ``agent.system_prompt``. Callers still prefer ``HERMES_EPHEMERAL_SYSTEM_PROMPT``."""
+    """Session overlay: the user-owned ``agent.system_prompt`` first, then the selected
+    ``display.personality`` render second. Either layer may be absent; callers still
+    prefer ``HERMES_EPHEMERAL_SYSTEM_PROMPT``."""
+    manual = prompt_text(_get(cfg, "agent", "system_prompt", default=""))
     name = active_personality_name(cfg)
-    if name:
-        return render_personality_prompt(available_personalities(cfg)[name])
-    return prompt_text(_get(cfg, "agent", "system_prompt", default=""))
+    if not name:
+        return manual
+    rendered = render_personality_prompt(available_personalities(cfg)[name])
+    if not manual:
+        return rendered
+    return f"{manual}\n\n{rendered}"
 
 
 def persist_personality(value: Any) -> bool:
