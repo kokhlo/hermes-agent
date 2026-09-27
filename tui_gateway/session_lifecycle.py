@@ -654,13 +654,18 @@ def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None =
     if should_interrupt:
         # Sibling of gateway/run_agent_cache.py::_interrupt_and_clear_session: a user-initiated stop of a
         # live TUI/desktop turn is the same "loop is gone" event for plugins holding per-turn external
-        # resources. Observer-only; dispatch failures never break the interrupt.
+        # resources. Observer-only; dispatch failures never break the interrupt. Scoped to the session's
+        # profile like _finalize_session's interrupted on_session_end: an unscoped dispatch on a backend
+        # serving several profiles runs observers against the LAUNCH profile's home/secrets, and the
+        # session key alone cannot disambiguate owners across independent profile stores.
         try:
             from hermes_cli.plugins import invoke_hook as _invoke_hook
-            _invoke_hook(
-                "agent_loop_stopped", session_key=session.get("session_key", ""), platform="tui",
-                reason="user_stop", invalidation_reason="session_interrupt",
-            )
+            with _session_profile_runtime_scope(session):
+                _invoke_hook(
+                    "agent_loop_stopped", session_key=session.get("session_key", ""),
+                    profile_home=session.get("profile_home") or str(get_hermes_home()),
+                    platform="tui", reason="user_stop", invalidation_reason="session_interrupt",
+                )
         except Exception:
             logger.debug("agent_loop_stopped hook dispatch failed", exc_info=True)
     if not use_compute_host:
