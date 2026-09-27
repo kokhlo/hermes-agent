@@ -10,6 +10,7 @@ id), agent_id. MEM0_* env vars remain a fallback.
 from __future__ import annotations
 
 import atexit
+import importlib.util
 import json
 import logging
 import threading
@@ -169,12 +170,34 @@ class Mem0MemoryProvider(MemoryProvider):
         """OSS-only hint; ``{vs}`` is the configured vector-store provider. "" in other modes."""
         return template.format(vs=self._config.get("oss", {}).get("vector_store", {}).get("provider", default)) if self._mode == "oss" else ""
 
+    def _missing_oss_dep(self) -> str | None:
+        """The unimportable embedder SDK, if any.
+
+        Checked before the backend is built because the embedder is the one
+        mem0ai path that answers a missing SDK with an interactive install
+        prompt — in a TTY-less session that EOFs and surfaces as an opaque
+        "EOF when reading a line" after the activation line already claimed
+        the provider is on. Every other path raises a plain ImportError the
+        backend import below reports verbatim."""
+        from ._oss_providers import EMBEDDER_PROVIDERS
+        block = (self._config or {}).get("oss", {}).get("embedder", {})
+        dep = EMBEDDER_PROVIDERS.get(str(block.get("provider") or "").strip().lower(), {}).get("pip_dep")
+        if dep and importlib.util.find_spec(dep.replace("-", "_").split("[")[0]) is None:
+            return dep
+        return None
+
     def _create_backend(self):
         # Make the pinned mem0 extra importable first; on failure the backend import
         # raises the canonical error, captured below.
         with suppress(Exception):
             from pm import ensure_import
             ensure_import("mem0")
+        if self._mode == "oss":
+            missing = self._missing_oss_dep()
+            if missing:
+                logger.error("Mem0 OSS backend needs the %s package. Declare it in the mem0 extra's requirements and re-run `hermes pm install`, then restart Hermes.", missing)
+                self._init_error = f"missing dependency: {missing}"
+                return None
         try:
             from . import _backend
             if self._mode == "oss":

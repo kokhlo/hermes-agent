@@ -1,5 +1,6 @@
 """Tests for Mem0 v3 API — new tool names, paginated responses, update/delete tools."""
 
+import importlib.util
 import json
 import threading
 import pytest
@@ -449,6 +450,31 @@ class TestCreateBackendRouting:
         provider._host = host
         provider._config = {"oss": {"vector_store": {"provider": "qdrant"}}}
         return provider
+
+    def test_oss_missing_embedder_sdk_fails_loudly_not_with_a_prompt(self, monkeypatch):
+        """An OSS config whose embedder SDK is absent must fail before mem0 is
+        touched: mem0's ollama embedder answers a missing SDK with an interactive
+        install prompt, which EOFs in a TTY-less session right after the provider
+        activation line claimed memory is on."""
+        monkeypatch.setattr("pm.ensure_import", lambda *a, **k: None, raising=False)
+        real_find_spec = importlib.util.find_spec
+
+        def _no_ollama(name, *args, **kwargs):
+            return None if name == "ollama" else real_find_spec(name, *args, **kwargs)
+
+        monkeypatch.setattr(importlib.util, "find_spec", _no_ollama)
+        provider = Mem0MemoryProvider()
+        provider._mode = "oss"
+        provider._config = {"oss": {"embedder": {"provider": "ollama", "config": {}}, "vector_store": {"provider": "qdrant"}}}
+        assert provider._create_backend() is None
+        assert provider._init_error == "missing dependency: ollama"
+
+    def test_oss_openai_embedder_without_pip_dep_never_trips_the_guard(self, monkeypatch):
+        monkeypatch.setattr("pm.ensure_import", lambda *a, **k: None, raising=False)
+        provider = Mem0MemoryProvider()
+        provider._mode = "oss"
+        provider._config = {"oss": {"embedder": {"provider": "openai", "config": {}}}}
+        assert provider._missing_oss_dep() is None
 
     def test_routes_to_selfhosted_when_host_set(self, monkeypatch):
         captured = {}

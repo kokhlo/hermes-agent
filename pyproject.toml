@@ -366,8 +366,13 @@ supermemory = ["supermemory==3.50.0"]
 # mem0ai pulls qdrant-client → grpcio, which has no win_arm64 wheel — same
 # win32-arm64 gate as google-chat. mem0 is lazy-installed, so on arm64 the
 # provider is simply unavailable.
+# mem0ai ships its ollama client only under its own `llms` extra, while the
+# OSS wizard offers ollama as both LLM and embedder and the embeddings
+# factory imports it unconditionally — declare it so the extra alone is
+# enough to run every provider the setup wizard offers.
 mem0 = [
   "mem0ai==2.0.10; platform_machine != 'ARM64' or sys_platform != 'win32'",
+  "ollama>=0.3.0; platform_machine != 'ARM64' or sys_platform != 'win32'",
 ]
 # Image resize recovery for the vision tools. Pillow is now a CORE dependency
 # (see the main `dependencies` list above) since the byte/pixel shrink paths are on
