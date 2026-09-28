@@ -397,6 +397,40 @@ test('locateHermes tries the conventional venv path last', async () => {
   assert.equal(await locateHermes(ssh, ''), '~/.hermes/hermes-agent/venv/bin/hermes')
 })
 
+test('locateHermes rejects an explicit path that is a directory', async () => {
+  // POSIX `[ -x ]` alone passes for a traversable directory; the launcher probe
+  // must also require a regular file, or `<dir> serve --help` answers "Is a
+  // directory" and the capability probe reports a perfectly current remote as
+  // out of date. The first rule answers OK only to a bare `-x` probe.
+  const ssh = fakeSsh([
+    [/^\[ -x /, 'OK'],
+    [/\[ -d .*\/opt\/hermes-agent/, 'DIR']
+  ])
+
+  await assert.rejects(
+    () => locateHermes(ssh, '/opt/hermes-agent'),
+    (err: any) => {
+      assert.equal(err.kind, 'hermes-not-found')
+      assert.match(err.message, /directory/i)
+
+      return true
+    }
+  )
+})
+
+test('locateHermes auto-detect skips a directory the login shell reports', async () => {
+  // `command -v hermes` names a directory here; the bare `-x` probe would
+  // accept it, the file+exec probe must not — the ladder falls through to the
+  // real install at ~/.local/bin/hermes.
+  const ssh = fakeSsh([
+    [/command -v hermes/, '/opt/tools\n'],
+    [/^\[ -x /, 'OK'],
+    [/\[ -x .*\.local\/bin\/hermes/, 'OK']
+  ])
+
+  assert.equal(await locateHermes(ssh, ''), '~/.local/bin/hermes')
+})
+
 test('locateHermes throws a hermes-not-found error with an install hint', async () => {
   const ssh = fakeSsh([]) // nothing is executable
   await assert.rejects(

@@ -181,12 +181,27 @@ async function locateHermes(ssh, remoteHermesPath) {
     return candidate
   }
 
+  // A traversable directory passes `[ -x ]` on POSIX, so a regular-file check is
+  // required: `<directory> serve --help` fails with "Is a directory" and the
+  // SSH capability probe misreads that NO as an outdated remote install.
   const isExecutable = async (candidate: string) => {
     try {
       validateRemotePath(candidate)
-      const ok = (await ssh.exec(`[ -x ${expandRemotePath(candidate)} ] && echo OK || true`)).trim()
+      const p = expandRemotePath(candidate)
+      const ok = (await ssh.exec(`[ -f ${p} ] && [ -x ${p} ] && echo OK || true`)).trim()
 
       return ok === 'OK'
+    } catch {
+      return false
+    }
+  }
+
+  const isRemoteDirectory = async (candidate: string) => {
+    try {
+      validateRemotePath(candidate)
+      const d = (await ssh.exec(`[ -d ${expandRemotePath(candidate)} ] && echo DIR || true`)).trim()
+
+      return d === 'DIR'
     } catch {
       return false
     }
@@ -198,9 +213,12 @@ async function locateHermes(ssh, remoteHermesPath) {
     }
 
     const err: any = new Error(
-      `The Hermes path you set is not an executable on the remote host: "${remoteHermesPath}". ` +
-        'Check the path (it must be the full path to the `hermes` binary on the remote, e.g. ' +
-        '~/hermes-agent/.venv/bin/hermes), or clear it to auto-detect.'
+      (await isRemoteDirectory(remoteHermesPath))
+        ? `The Hermes path set for this connection is a directory, not an executable: "${remoteHermesPath}". ` +
+          'Set it to the remote `hermes` binary (e.g. ~/.local/bin/hermes), or clear it to auto-detect.'
+        : `The Hermes path you set is not an executable on the remote host: "${remoteHermesPath}". ` +
+          'Check the path (it must be the full path to the `hermes` binary on the remote, e.g. ' +
+          '~/hermes-agent/.venv/bin/hermes), or clear it to auto-detect.'
     )
 
     err.kind = 'hermes-not-found'
