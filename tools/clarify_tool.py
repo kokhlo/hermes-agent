@@ -4,6 +4,7 @@ callback (cli.py, gateway/run.py, tui_gateway)."""
 
 import inspect
 import json
+import re
 from typing import Dict, List, Optional, Callable
 
 MAX_CHOICES = 4  # the UI always appends an "Other (type your answer)" row
@@ -41,12 +42,22 @@ def mark_recommended(choices: List[str]) -> List[str]:
     return [f"{first} {RECOMMENDED_LABEL}"] + list(choices[1:])
 
 
+_LOCALIZED_RECOMMENDED_RE = re.compile(
+    r"[\s]*[\(\[\{（［【｛][\s]*(?:recommended|rec|empfohlen|recommandé|recomendado|推荐|рекомендуется|рекомендую)"
+    r"(?:[\s]*[:：].*)?[\s]*[\)\]\}）］】｝][\s]*$",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
 def strip_recommended(text: str) -> str:
-    """Remove the recommendation label so presentation never leaks into ``user_response``."""
+    """Remove a trailing recommendation label — the canonical English one or the
+    localized equivalents a model naturally writes (``（推荐）``, ``（рекомендуется）``,
+    ``(empfohlen)``…) — so presentation never leaks into ``user_response`` and
+    ``mark_recommended`` stays idempotent in any locale."""
     stripped = str(text).strip()
     if stripped.casefold().endswith(RECOMMENDED_LABEL.casefold()):
-        return stripped[: -len(RECOMMENDED_LABEL)].strip()
-    return stripped
+        stripped = stripped[: -len(RECOMMENDED_LABEL)].strip()
+    return _LOCALIZED_RECOMMENDED_RE.sub("", stripped).strip()
 
 
 def _accepts_kwarg(callback, name: str) -> bool:
