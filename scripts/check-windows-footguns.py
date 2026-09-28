@@ -21,6 +21,8 @@ Usage:
 Exit status:
     0 — no Windows footguns found (or all matches suppressed)
     1 — at least one unsuppressed match
+    2 — the --diff range could not be computed (unresolvable ref,
+        shallow clone with no merge base, or git missing)
 
 Encoding policy: READS pass encoding='utf-8-sig' (Windows tooling —
 PowerShell Set-Content/Out-File, some editors — BOM-prefixes files it
@@ -839,18 +841,42 @@ def get_staged_files() -> list[Path]:
     return [REPO_ROOT / f for f in out.splitlines() if f.strip()]
 
 
+class DiffRangeError(RuntimeError):
+    """git could not compute the requested <ref>...HEAD range."""
+
+
 def get_diff_files(ref: str) -> list[Path]:
-    """Return paths modified vs. the given git ref."""
+    """Return paths modified vs. the given git ref.
+
+    Raises DiffRangeError when git cannot produce the range — an unknown
+    ref, a shallow clone with no merge base, or a missing git binary. An
+    empty diff and a failed diff must never yield the same receipt: the
+    old behaviour reported "0 file(s) scanned" and exit 0 for all three.
+    """
     try:
-        out = subprocess.check_output(
+        proc = subprocess.run(
             ["git", "diff", f"{ref}...HEAD", "--name-only", "--diff-filter=ACMR"],
             cwd=REPO_ROOT,
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
             text=True, encoding='utf-8', errors='replace',
         )
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return []
-    return [REPO_ROOT / f for f in out.splitlines() if f.strip()]
+    except FileNotFoundError as exc:
+        raise DiffRangeError(f"git binary not found — cannot diff {ref}...HEAD") from exc
+    if proc.returncode != 0:
+        detail = " ".join((proc.stderr or "").strip().splitlines())
+        remedy = ""
+        if "no merge base" in (proc.stderr or ""):
+            remedy = (
+                " Shallow clone? Deepen history with `git fetch --deepen=<n>` "
+                "(or --unshallow), or pass an explicit base SHA. Note that "
+                "`ref..HEAD` is not an equivalent fallback — it diffs the "
+                "wrong side of the history."
+            )
+        raise DiffRangeError(
+            f"`git diff {ref}...HEAD` failed with exit {proc.returncode}: "
+            f"{detail or 'no diagnostics captured'}.{remedy}"
+        )
+    return [REPO_ROOT / f for f in proc.stdout.splitlines() if f.strip()]
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -919,7 +945,12 @@ def main(argv: list[str]) -> int:
         ]
         roots = [r for r in roots if r.exists()]
     elif args.diff:
-        roots = get_diff_files(args.diff)
+        try:
+            roots = get_diff_files(args.diff)
+        except DiffRangeError as exc:
+            print(f"✗ Cannot compute the --diff {args.diff} range: {exc}",
+                  file=sys.stderr)
+            return 2
     elif args.paths:
         roots = [p.resolve() for p in args.paths]
     else:
@@ -961,6 +992,12 @@ def main(argv: list[str]) -> int:
         )
         return 1
 
+    if args.diff and not files_scanned:
+        print(
+            f"✓ No Windows footguns found — nothing changed vs {args.diff} "
+            f"(0 file(s) scanned)."
+        )
+        return 0
     print(
         f"✓ No Windows footguns found ({files_scanned} file(s) scanned)."
     )
