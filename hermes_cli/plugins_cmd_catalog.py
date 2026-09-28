@@ -529,6 +529,7 @@ def repin_catalog_plugin(
     *,
     interactive: bool = False,
     consent_cb=None,
+    force: bool = False,
 ) -> RepinResult:
     """Re-pin a catalog install to the current catalog SHA (never ``git pull``).
 
@@ -541,6 +542,9 @@ def repin_catalog_plugin(
     is a new grant. ``consent_cb(delta) -> bool`` decides before publication; absent or declined raises
     :class:`RepinConsentRequired` with the installed tree untouched. The immutable catalog pin is
     previewed separately because the PM update transaction owns and publishes its own staged clone.
+
+    *force* accepts a caution scan verdict for the new pin (``plugins update --force``); the
+    dashboard leaves it off, and a dangerous verdict blocks either way.
     """
     from hermes_cli.plugins_cmd import (
         PluginOperationError,
@@ -592,6 +596,7 @@ def repin_catalog_plugin(
         catalog_entry=entry,
         interactive=interactive,
         carry_user_files=lambda staged: _carry_user_files(target, staged, local),
+        force=force,
     )
     matches = []
     for installed_name, row in _read_install_metadata().items():
@@ -633,7 +638,8 @@ def repin_catalog_plugin(
     return RepinResult(entry.sha, True, installed_name, warnings)
 
 
-def cmd_update_catalog(name: str, target: Path, sidecar: dict, console, *, interactive: bool = True) -> None:
+def cmd_update_catalog(name: str, target: Path, sidecar: dict, console, *, interactive: bool = True,
+                        force: bool = False) -> None:
     from hermes_cli.plugins_cmd import (
         PluginOperationError, _ask_yes, _declared_capabilities_from_manifest, _fail, _is_tty, _read_manifest,
         _run_capability_consent)
@@ -655,6 +661,7 @@ def cmd_update_catalog(name: str, target: Path, sidecar: dict, console, *, inter
             sidecar,
             interactive=interactive,
             consent_cb=_confirm_widening,
+            force=force,
         )
     except RepinConsentRequired as exc:
         _fail(console, f"[yellow]Update of {name} not applied:[/yellow] {exc}")
