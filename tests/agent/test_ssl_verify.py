@@ -170,3 +170,100 @@ assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname
 assert ctx.cert_store_stats()['x509_ca'] > 0
 """], capture_output=True, text=True, timeout=30)
     assert child.returncode == 0, child.stderr
+
+
+def test_injected_context_keeps_stdlib_introspection():
+    """truststore 0.10.x answers TLS from a private inner context and ships
+    cert_store_stats()/get_ca_certs() as raising stubs; once install_truststore()
+    rebinds ssl.SSLContext, libraries probing a context must still get
+    stdlib-shaped answers instead of an empty NotImplementedError."""
+    import subprocess
+    import sys
+
+    child = subprocess.run([sys.executable, "-c", """
+import ssl
+from agent.ssl_verify import install_truststore
+
+assert install_truststore() is True
+for ctx in (ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT), ssl.create_default_context()):
+    stats = ctx.cert_store_stats()
+    assert set(stats) == {"x509", "crl", "x509_ca"}, stats
+    assert isinstance(ctx.get_ca_certs(), list)
+    assert isinstance(ctx.get_ca_certs(binary_form=True), list)
+"""], capture_output=True, text=True, timeout=30)
+    assert child.returncode == 0, child.stderr
+
+
+def test_ca_probing_library_survives_injection():
+    """The crash class this guards against: a library probes the default
+    context's CA store to decide whether to load its own bundle; the probe
+    must answer instead of dying on an opaque empty-message failure."""
+    import subprocess
+    import sys
+
+    child = subprocess.run([sys.executable, "-c", """
+import ssl
+from agent.ssl_verify import install_truststore
+
+
+def ca_source_like_a_probing_library() -> str:
+    ctx = ssl.create_default_context()
+    try:
+        stats = ctx.cert_store_stats()
+    except NotImplementedError as exc:
+        raise RuntimeError("Failed to initialize CA loading: " + str(exc)) from exc
+    if stats.get("x509_ca", 0):
+        return "platform store"
+    return "certifi fallback"
+
+
+assert install_truststore() is True
+assert ca_source_like_a_probing_library() in ("platform store", "certifi fallback")
+"""], capture_output=True, text=True, timeout=30)
+    assert child.returncode == 0, child.stderr
+
+
+def test_broken_delegation_probe_rolls_back_to_stdlib():
+    """If a future truststore build changes shape and the delegation probe
+    fails, the install degrades to stdlib defaults instead of shipping a
+    poisoned context: ssl.SSLContext is the real class again and truststore's
+    own class is restored exactly as it shipped."""
+    import subprocess
+    import sys
+
+    child = subprocess.run([sys.executable, "-c", """
+import ssl
+import truststore
+
+stdlib_context = ssl.SSLContext
+real_init = truststore.SSLContext.__init__
+
+
+class BrokenInner:
+    def cert_store_stats(self):
+        raise RuntimeError("truststore shape changed")
+
+    def get_ca_certs(self, binary_form=False):
+        raise RuntimeError("truststore shape changed")
+
+
+def sabotaged_init(self, protocol=None):
+    real_init(self, protocol)
+    self._ctx = BrokenInner()
+
+
+truststore.SSLContext.__init__ = sabotaged_init
+from agent.ssl_verify import install_truststore
+
+assert install_truststore() is False
+assert ssl.SSLContext is stdlib_context
+try:
+    truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT).cert_store_stats()
+except NotImplementedError:
+    pass
+else:
+    raise AssertionError("truststore stubs were not restored")
+stats = ssl.create_default_context().cert_store_stats()
+assert set(stats) == {"x509", "crl", "x509_ca"}, stats
+"""], capture_output=True, text=True, timeout=30)
+    assert child.returncode == 0, child.stderr

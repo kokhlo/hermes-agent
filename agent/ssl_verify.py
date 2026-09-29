@@ -10,7 +10,12 @@ internal CA, and a locked-down NixOS box all work with no configuration.
 ``ssl.SSLContext`` process-wide, so every stack that builds a default
 context inherits it — httpx, requests/urllib3, aiohttp, AND the stdlib
 ``urllib.request`` call sites (the llama.cpp engine download among them)
-that a certifi-only or requests-only approach never reached.
+that a certifi-only or requests-only approach never reached. truststore
+answers TLS from a private inner context and ships the CA introspection
+methods as raising stubs, so the install also restores
+``cert_store_stats()``/``get_ca_certs()`` on the injected class: libraries
+that probe a context before deciding how to load CAs keep getting
+stdlib-shaped answers.
 
 The only thing above the platform store is EXPLICIT PER-PROVIDER CONFIG:
 ``ssl_ca_cert`` (a self-signed or internal endpoint's bundle) and
@@ -31,6 +36,47 @@ logger = logging.getLogger(__name__)
 _installed: bool | None = None
 
 
+_INTROSPECTION_METHODS = ("cert_store_stats", "get_ca_certs")
+
+
+def _restore_introspection_on_injected_class() -> None:
+    """Map the CA introspection methods onto truststore's inner context.
+
+    truststore verifies against the OS store, not the OpenSSL CA store the
+    stdlib methods report on, so upstream leaves them as raising stubs.
+    Callers that probe a context to decide how to load CAs (certifi
+    fallbacks among them) then die on an empty ``NotImplementedError``.
+    Delegating keeps those probes answering with the inner context's view
+    of the OpenSSL store — zero CAs until a bundle is actually loaded,
+    which is exactly what a probing caller needs to know.
+
+    Anything unexpected (a truststore build whose internals differ) rolls
+    the class back to how it shipped and re-raises; the caller degrades
+    the whole install to stdlib rather than keep a half-patched context.
+    """
+    import truststore
+
+    original = {name: getattr(truststore.SSLContext, name, None) for name in _INTROSPECTION_METHODS}
+
+    def _cert_store_stats(self):
+        return self._ctx.cert_store_stats()
+
+    def _get_ca_certs(self, binary_form: bool = False):
+        return self._ctx.get_ca_certs(binary_form)
+
+    setattr(truststore.SSLContext, "cert_store_stats", _cert_store_stats)
+    setattr(truststore.SSLContext, "get_ca_certs", _get_ca_certs)
+    try:
+        probe = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        probe.cert_store_stats()
+        probe.get_ca_certs()
+    except Exception:
+        for name, method in original.items():
+            if method is not None:
+                setattr(truststore.SSLContext, name, method)
+        raise
+
+
 def install_truststore() -> bool:
     """Point every default SSLContext at the OS trust store. Idempotent.
 
@@ -48,10 +94,17 @@ def install_truststore() -> bool:
         import truststore
 
         truststore.inject_into_ssl()
+        _restore_introspection_on_injected_class()
         _installed = True
         logger.debug("TLS trust: platform store (truststore)")
     except Exception as exc:  # noqa: BLE001 — never break startup over TLS setup
         _installed = False
+        try:
+            import truststore
+
+            truststore.extract_from_ssl()
+        except Exception:
+            pass
         logger.warning(
             "truststore unavailable (%s); falling back to OpenSSL's default "
             "trust paths. Certificates trusted only by the OS store — a "
