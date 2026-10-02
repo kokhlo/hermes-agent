@@ -293,8 +293,13 @@ function SearchResultsList({ hits }: { hits: SearchResultRow[] }) {
   )
 }
 
+// Error summaries are the densest source of filename-shaped tokens (paths the
+// tool refused to write, config it failed to read), and plenty of those
+// extensions are live TLDs — `README.md` resolves, and `pretty` would then
+// replace the path with whatever that page's <title> currently says. Link only
+// what was written as a URL, like thread/system-message.tsx does.
 function LinkifiedText({ className, text }: { className?: string; text: string }) {
-  return <SharedLinkifiedText className={className} pretty text={cleanVisibleText(text)} />
+  return <SharedLinkifiedText className={className} explicitOnly pretty text={cleanVisibleText(text)} />
 }
 
 function ToolTitle({
