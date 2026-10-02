@@ -269,3 +269,39 @@ def test_docs_append_carries_tab_id_and_refuses_ambiguous_writes(api_module, mon
         api_module.docs_append(types.SimpleNamespace(doc_id="doc1", text="more", tab=None))
     err = json.loads(capsys.readouterr().err)
     assert "tabs" in err and len(err["tabs"]) == 3
+
+
+def test_gmail_search_gws_path_prints_empty_json_array(api_module, monkeypatch, capsys):
+    """The gws path is the reference output contract: a search that matches
+    nothing is a successful empty result, printed as a JSON array."""
+    monkeypatch.setattr(api_module, "_gws_binary", lambda: "/usr/bin/gws")
+    monkeypatch.setattr(api_module, "_run_gws", lambda parts, params=None, body=None: {})
+
+    api_module.gmail_search(types.SimpleNamespace(query="is:unread", max=10))
+
+    assert json.loads(capsys.readouterr().out) == []
+
+
+def test_gmail_search_python_fallback_prints_empty_json_array(api_module, monkeypatch, capsys):
+    """The bundled Python client must honour the same contract as gws, so a
+    caller can parse successful search output without knowing which backend
+    the machine happens to have installed."""
+    class EmptyGmail:
+        def users(self):
+            return self
+
+        def messages(self):
+            return self
+
+        def list(self, **kwargs):
+            return self
+
+        def execute(self):
+            return {"resultSizeEstimate": 0}
+
+    monkeypatch.setattr(api_module, "_gws_binary", lambda: None)
+    monkeypatch.setattr(api_module, "build_service", lambda *args, **kwargs: EmptyGmail())
+
+    api_module.gmail_search(types.SimpleNamespace(query="is:unread", max=10))
+
+    assert json.loads(capsys.readouterr().out) == []
