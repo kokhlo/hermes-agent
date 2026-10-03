@@ -10,7 +10,8 @@ retry lands: the refusal counter climbs without bound and each cycle appends to
 
 The 75 contract is "the owner will go away on its own, try again". A supervised owner never does,
 so those refusals park on 78 (``RestartPreventExitStatus``) instead. A shell-launched owner still
-retries, which is the case the 75 exists for.
+retries, which is the case the 75 exists for — and so does an owner that has already vanished,
+which is why a process that is GONE must stay distinguishable from one that is merely unreadable.
 """
 
 from __future__ import annotations
@@ -58,8 +59,8 @@ def gw_module():
     return gw
 
 
-def _patch_owner(monkeypatch, environ, *, readable: bool = True):
-    monkeypatch.setattr(restart_mod, "_pid_environ", lambda pid: environ if readable else None)
+def _patch_owner(monkeypatch, environ):
+    monkeypatch.setattr(restart_mod, "_pid_environ", lambda pid: environ)
 
 
 # --- the tri-state discriminator -------------------------------------------------
@@ -94,15 +95,42 @@ def test_unreadable_owner_environment_is_unknown_not_transient(monkeypatch):
     An unreadable environment is not evidence of an owner that exits, so it must never answer
     ``False`` — that would restore exactly the loop being fixed.
     """
-    _patch_owner(monkeypatch, None, readable=False)
+    _patch_owner(monkeypatch, restart_mod._ENVIRON_DENIED)
     assert is_supervised_gateway_owner(4242) is None
+
+
+def test_owner_process_gone_reads_transient(monkeypatch):
+    """No such process (``_pid_environ`` -> ``None``): the owner can genuinely go away.
+
+    This is the case a supervised unit must keep RETRYING: the observation that "someone serves
+    me" was already stale when it was made, so parking on it would strand the profile (#118236
+    shaped). It is also why the unreadable case above cannot simply answer ``False``.
+    """
+    _patch_owner(monkeypatch, None)
+    assert is_supervised_gateway_owner(4242) is False
+
+
+def test_denied_and_gone_are_distinguished(monkeypatch):
+    """``None`` (gone) and the denied sentinel (alive but uninspectable) must not collapse.
+
+    Collapsing them is what broke ``test_a_supervised_attach_is_retried_not_parked``: a vanished
+    owner was treated as durable, parking a unit whose profile would have started on retry.
+    """
+    assert _pid_environ_result(monkeypatch, None) is None
+    assert _pid_environ_result(monkeypatch, restart_mod._ENVIRON_DENIED) is restart_mod._ENVIRON_DENIED
+    assert _pid_environ_result(monkeypatch, SHELL_ENV) is SHELL_ENV
+
+
+def _pid_environ_result(monkeypatch, value):
+    _patch_owner(monkeypatch, value)
+    return restart_mod._pid_environ(4242)
 
 
 # --- the exit-code decision ------------------------------------------------------
 
 
-def _exit_code(gw, monkeypatch, environ, *, readable: bool = True):
-    _patch_owner(monkeypatch, environ, readable=readable)
+def _exit_code(gw, monkeypatch, environ):
+    _patch_owner(monkeypatch, environ)
     return gw._host_decision_exit_code(_Decision(transient=True, owner=_Owner()))
 
 
@@ -117,8 +145,14 @@ def test_shell_owner_still_retries(gw_module, monkeypatch):
 
 
 def test_unreadable_owner_parks_rather_than_looping(gw_module, monkeypatch):
-    """Prefer a parked unit over an unbounded loop when the owner cannot be inspected."""
-    assert _exit_code(gw_module, monkeypatch, None, readable=False) == GATEWAY_FATAL_CONFIG_EXIT_CODE
+    """Prefer a parked unit over an unbounded loop when the owner is alive but uninspectable."""
+    assert _exit_code(gw_module, monkeypatch, restart_mod._ENVIRON_DENIED) \
+        == GATEWAY_FATAL_CONFIG_EXIT_CODE
+
+
+def test_vanished_owner_still_retries(gw_module, monkeypatch):
+    """The owner is gone: retrying is the whole point, and parking would strand the profile."""
+    assert _exit_code(gw_module, monkeypatch, None) == GATEWAY_SERVICE_RESTART_EXIT_CODE
 
 
 def test_non_transient_verdict_parks_unchanged(gw_module, monkeypatch):

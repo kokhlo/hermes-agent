@@ -1,11 +1,15 @@
 """Shared gateway restart constants and supervisor detection helpers."""
 
+import contextlib
 import math
 import os
 import re
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
+from enum import Enum
+from pathlib import Path
+from typing import Literal
 
 from hermes_cli.config import DEFAULT_CONFIG
 
@@ -255,19 +259,40 @@ def is_gateway_supervisor_process(environ: Mapping[str, str] | None = None) -> b
                 or str(env.get(EXTERNAL_GATEWAY_SUPERVISOR_ENV, "")).strip().lower() in _TRUTHY)
 
 
-def _pid_environ(pid: int) -> dict[str, str] | None:
-    """Exec-time environment of *pid* (psutil, then /proc); ``None`` when unreadable."""
-    import contextlib
-    from pathlib import Path
+class _EnvironDenied(Enum):
+    """The owner process EXISTS but its environment is not readable (other UNIX user, hardened
+    ``/proc``). Distinct from a process that is simply GONE, which ``_pid_environ`` answers with
+    ``None`` — the two mean opposite things to a caller deciding whether to retry."""
 
-    with contextlib.suppress(Exception):
+    DENIED = "denied"
+
+
+_ENVIRON_DENIED = _EnvironDenied.DENIED
+
+
+def _pid_environ(pid: int) -> dict[str, str] | None | Literal[_ENVIRON_DENIED]:
+    """Exec-time environment of *pid*.
+
+    Three outcomes, because they mean different things to a caller deciding whether to retry:
+    the ``dict`` when readable, ``_ENVIRON_DENIED`` when the process is there but the environment
+    is another user's, and ``None`` when no such process exists (so its owner may genuinely go
+    away). psutil distinguishes the three by exception; ``/proc`` by errno.
+    """
+    with contextlib.suppress(ImportError):
         import psutil
 
-        return dict(psutil.Process(pid).environ())
+        try:
+            return dict(psutil.Process(pid).environ())
+        except psutil.NoSuchProcess:
+            return None
+        except psutil.AccessDenied:
+            return _ENVIRON_DENIED
     try:
         raw = Path(f"/proc/{pid}/environ").read_bytes()
-    except OSError:
+    except FileNotFoundError:
         return None
+    except OSError:
+        return _ENVIRON_DENIED
     env: dict[str, str] = {}
     for part in raw.split(b"\x00"):
         key, sep, value = part.partition(b"=")
@@ -280,21 +305,22 @@ def is_supervised_gateway_owner(pid: int | None) -> bool | None:
     """Tri-state: is *pid* a gateway that a supervisor will KEEP running?
 
     ``True`` the owner is itself service-launched, so it keeps serving through anything we do —
-    a retry cannot change the verdict. ``False`` the owner is a shell-launched process that can
-    genuinely exit, so retrying is meaningful. ``None`` the owner's environment is unreadable
-    (another UNIX user, hardened ``/proc``), which is exactly the duplicate-install shape: a
-    system-scope unit owns the host while the unit asking runs as the unprivileged user. An
-    unreadable environment is NOT evidence of a transient owner, so it never answers ``False``.
-
-    A second unit asking about an owner it cannot inspect would otherwise retry forever against a
-    service that never yields, and the generated unit pairs ``Restart=always`` with
-    ``RestartForceExitStatus=75`` and no start-rate limit, so every retry lands (#132286).
+    a retry cannot change the verdict, so the caller must park. ``False`` the owner is a shell
+    process, or is already gone: either way it can genuinely exit, so retrying is meaningful and
+    the caller's 75 route stays. ``None`` the owner is alive and its environment is not readable
+    (another UNIX user, hardened ``/proc``) — the duplicate-install shape, where a system-scope
+    unit owns the host while the unit asking runs unprivileged. An owner we cannot inspect is not
+    evidence of one that will go away, so it must never answer ``False``: retrying against it is
+    the unbounded loop of #132286, since the generated unit pairs ``Restart=always`` with
+    ``RestartForceExitStatus=75`` and no start-rate limit, so every retry lands.
     """
     if pid is None or pid <= 0 or pid == os.getpid():
         return None
     env = _pid_environ(pid)
     if env is None:
-        return None
+        return False      # no such process: the owner can go away, so a retry can still win
+    if env is _ENVIRON_DENIED:
+        return None       # alive and uninspectable: not proof of an owner that exits
     return is_supervised_gateway_launch(env)
 
 
