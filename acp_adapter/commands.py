@@ -325,7 +325,6 @@ class SlashCommandsMixin:
             mutate=_mutate,
             text_of=str,
             with_text=lambda _item, text: text,
-            enqueue_usage=queue_command.USAGE,
         )
         if result.enqueue is not None:
             return f"Queued for the next turn. ({_queue_prompt(state, result.enqueue)} queued)"
