@@ -45,6 +45,10 @@ except ImportError:  # pragma: no cover - dependency guidance only
 # rejects it. The two gates must see the same strings identically.
 NAME_RE = re.compile(r"^[a-z0-9_-]{1,64}\Z")
 SHA_RE = re.compile(r"^[0-9a-f]{40}\Z")
+# A tag is free-form, so the vocabulary is deliberately unbounded; only the shape
+# is gated. Lowercase so a query typed into the catalog search matches a tag the
+# way it was written. Same \Z discipline as NAME_RE above.
+TAG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}\Z")
 TIERS = ("official", "community")
 CATEGORIES = ("desktop", "memory", "platform", "web", "tools", "voice", "automation", "models", "general")
 PLATFORMS = ("linux", "macos", "windows")
@@ -73,6 +77,7 @@ KNOWN_KEYS = {
     "readme",
     "platforms",
     "capabilities",
+    "tags",
     "title",
     "onboarding",
     "known_issues",
@@ -218,6 +223,22 @@ def validate_entry(data: object) -> tuple[list[str], list[str]]:
         bad = [p for p in platforms if p not in PLATFORMS]
         if bad:
             errors.append(f"platforms {bad!r} not in allowed set {list(PLATFORMS)}")
+
+    # Free-form sub-category labels. Not an enumerated set: the vocabulary grows
+    # as submitters need it, so only the shape is gated — a tag is a short
+    # lowercase slug so search matches it the way a typed query would.
+    tags = data.get("tags")
+    if tags is not None:
+        if not isinstance(tags, list):
+            errors.append("tags must be a list")
+        else:
+            bad = [t for t in tags if not isinstance(t, str) or not TAG_RE.match(t)]
+            if bad:
+                errors.append(
+                    f"tags {bad!r} must be lowercase slugs of a-z, 0-9 and '-' (max 32 chars)"
+                )
+            elif len(set(tags)) != len(tags):
+                errors.append("tags must not repeat a label")
 
     caps = data.get("capabilities", {})
     if caps is None:

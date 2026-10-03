@@ -133,12 +133,38 @@ image: ""                   # optional https image on a GitHub host, 2:1 (e.g. 1
 screenshots: []             # optional, up to 6 https images on a GitHub host; gallery on /docs/plugins/<name>
 readme: true                # optional, default true; the README at the PINNED SHA renders on /docs/plugins/<name>
 platforms: []               # optional, e.g. [linux, macos]; empty = all
+tags: []                    # optional free-form sub-category labels, e.g. [design, writing];
+                            # searched alongside name and description (see "Tags" below)
 capabilities:
   provides_tools: []
   provides_hooks: []
   provides_middleware: []
   requires_env: []
 ```
+
+## Tags
+
+`category:` decides which shelf an entry sits on, and there are only nine of
+them — enough to browse, not enough to separate the 200-odd entries that share
+`tools` or `desktop`. `tags:` is the free-form layer underneath: a short label
+that narrows a search to a slice of one category, so "desktop plugins that only
+touch design" is one query instead of a scroll.
+
+A tag is a lowercase slug of `a-z`, `0-9` and `-`, at most 32 characters, and
+an entry may not repeat one. There is no fixed vocabulary — a new tag is a new
+tag, and nothing has to be registered anywhere first. The suggested starting
+set is below; reuse one of those where it fits, and coin a new one only when
+none of them describes what your plugin actually does:
+
+`design`, `writing`, `research`, `coding`, `data`, `media`, `social`,
+`productivity`, `security`, `devops`, `finance`, `education`, `health`,
+`shopping`, `travel`, `local`
+
+Search is the whole feature: tags are folded into the same precomputed haystack
+as the name and the description, so a typed query matches them at no extra
+per-keystroke cost. Tags are not rendered as their own filter row, and they do
+not affect what installs — they are labels, not behaviour. Leave the field out
+or empty for an entry that gains nothing from a sub-category.
 
 `version`, `image`, `screenshots` and `readme` are cosmetic: none is parsed or
 used to pick what installs. The sha stays the release; bump `version` in the

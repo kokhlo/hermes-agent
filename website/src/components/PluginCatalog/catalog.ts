@@ -24,6 +24,8 @@ export interface CatalogPlugin {
   requiresHermes?: string;
   platforms?: string[];
   capabilities?: PluginCapabilities;
+  /** Free-form sub-category labels, searchable alongside name and description. */
+  tags?: string[];
   docsUrl?: string;
   /** Human label for the pin ("1.4.0"); cosmetic, shown beside the sha. */
   version?: string;

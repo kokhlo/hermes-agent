@@ -133,6 +133,36 @@ def test_unknown_tier_normalizes_to_community(mod, tmp_path):
     assert entries[0]["tier"] == "community"
 
 
+def test_tags_are_emitted_verbatim(mod, tmp_path):
+    """Free-form sub-category labels reach plugins.json so the search haystack can see them."""
+    catalog = tmp_path / "plugin-catalog"
+    catalog.mkdir()
+    _write_entry(catalog, "tagged", tags=["design", "web-design-2"])
+
+    entries = mod.load_catalog_entries(catalog)
+    assert entries[0]["tags"] == ["design", "web-design-2"]
+
+
+def test_absent_tags_extract_as_empty_list(mod, tmp_path):
+    """Pre-tags entries must keep working: no key in the YAML, empty list in the row."""
+    catalog = tmp_path / "plugin-catalog"
+    catalog.mkdir()
+    _write_entry(catalog, "untagged")
+
+    entries = mod.load_catalog_entries(catalog)
+    assert entries[0]["tags"] == []
+
+
+def test_tags_survive_a_string_scalar(mod, tmp_path):
+    """A single tag written as a YAML scalar normalizes to a one-element list."""
+    catalog = tmp_path / "plugin-catalog"
+    catalog.mkdir()
+    _write_entry(catalog, "scalar-tag", tags="design")
+
+    entries = mod.load_catalog_entries(catalog)
+    assert entries[0]["tags"] == ["design"]
+
+
 def test_version_and_image_are_emitted_and_offhost_image_is_dropped_not_fatal(mod, tmp_path):
     catalog = tmp_path / "plugin-catalog"
     catalog.mkdir()

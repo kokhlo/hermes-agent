@@ -53,6 +53,12 @@ for word, and a test fails the build if the two drift apart.
    [entry schema](https://github.com/NousResearch/hermes-agent/blob/main/plugin-catalog/README.md#entry-schema)
    and in [What's in an entry](../../user-guide/features/plugin-catalog.md#whats-in-an-entry).
    Pin `sha` to a full 40-character commit, and quote `version`.
+   Add `tags:` if your plugin does something narrower than its `category:` can
+   express — it is a free-form list of lowercase slugs, searched alongside the
+   name and description so a user can pull out your plugin without reading past
+   the rest of the shelf. Reuse one of the labels listed in the README's
+   [Tags](https://github.com/NousResearch/hermes-agent/blob/main/plugin-catalog/README.md#tags)
+   section where one fits, and leave the field out otherwise.
 2. In the PR description, say what the plugin does, which Hermes surfaces it
    uses, and everything rule 13 asks you to disclose. Add screenshots for
    anything with a UI.

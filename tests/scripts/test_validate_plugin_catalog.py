@@ -194,6 +194,59 @@ def test_capabilities_list_of_non_strings_fails(tmp_path):
     )
 
 
+def test_tags_absent_passes(tmp_path):
+    """A pre-tags entry stays valid: the field is optional by construction."""
+    entry = {**VALID_ENTRY}
+    entry.pop("tags", None)
+    path = write_entry(tmp_path, entry)
+    result = run_validator(str(path))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_empty_tags_passes(tmp_path):
+    path = write_entry(tmp_path, {**VALID_ENTRY, "tags": []})
+    result = run_validator(str(path))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_free_form_tag_passes(tmp_path):
+    """No fixed vocabulary: a tag nobody registered still validates."""
+    path = write_entry(tmp_path, {**VALID_ENTRY, "tags": ["quantum-teleportation"]})
+    result = run_validator(str(path))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_tags_not_a_list_fails(tmp_path):
+    _expect_error(tmp_path, {"tags": "design"}, "tags must be a list")
+
+
+def test_tags_with_non_string_fails(tmp_path):
+    _expect_error(tmp_path, {"tags": ["design", 7]}, "tags")
+
+
+def test_tags_with_uppercase_fails(tmp_path):
+    """Slugs are lowercase so a typed query matches them verbatim."""
+    _expect_error(tmp_path, {"tags": ["Design"]}, "tags")
+
+
+def test_tags_with_space_fails(tmp_path):
+    _expect_error(tmp_path, {"tags": ["web design"]}, "tags")
+
+
+def test_tag_longer_than_32_chars_fails(tmp_path):
+    _expect_error(tmp_path, {"tags": ["a" * 33]}, "tags")
+
+
+def test_tag_at_32_chars_passes(tmp_path):
+    path = write_entry(tmp_path, {**VALID_ENTRY, "tags": ["a" * 32]})
+    result = run_validator(str(path))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_repeated_tag_fails(tmp_path):
+    _expect_error(tmp_path, {"tags": ["design", "design"]}, "repeat")
+
+
 def test_bad_requires_hermes_spec_fails(tmp_path):
     _expect_error(tmp_path, {"requires_hermes": "banana"}, "requires_hermes")
 

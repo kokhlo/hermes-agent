@@ -356,6 +356,7 @@ function buildSearchHaystack(p: CatalogPlugin): string {
     p.tier,
     p.category,
     CATEGORY_CONFIG[p.category]?.label,
+    ...(p.tags || []),
     ...(p.capabilities?.providesTools || []),
     ...(p.capabilities?.providesHooks || []),
     ...(p.capabilities?.requiresEnv || []),
