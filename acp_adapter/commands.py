@@ -301,10 +301,35 @@ class SlashCommandsMixin:
         return f"No active turn — queued for the next turn. ({_queue_prompt(state, steer_text)} queued)"
 
     def _cmd_queue(self, args: str, state: SessionState) -> str:
-        queued_text = args.strip()
-        if not queued_text:
-            return "Usage: /queue <prompt>"
-        return f"Queued for the next turn. ({_queue_prompt(state, queued_text)} queued)"
+        """Queue a prompt, or manage the ones already queued.
+
+        The verbs come from the shared grammar, so ``/queue list``/``rm N``/``clear`` mean the
+        same thing here as in the CLI and the TUI instead of queueing the word as a prompt.
+        """
+        from hermes_cli import queue_command
+
+        def _snapshot() -> list:
+            with state.runtime_lock:
+                return list(state.queued_prompts)
+
+        def _mutate(change):
+            with state.runtime_lock:
+                before = list(state.queued_prompts)
+                after = list(change(list(before)))
+                state.queued_prompts[:] = after
+                return before, after
+
+        result = queue_command.apply_queue_command(
+            queue_command.parse_queue_command(args),
+            snapshot=_snapshot,
+            mutate=_mutate,
+            text_of=str,
+            with_text=lambda _item, text: text,
+            enqueue_usage=queue_command.USAGE,
+        )
+        if result.enqueue is not None:
+            return f"Queued for the next turn. ({_queue_prompt(state, result.enqueue)} queued)"
+        return result.output
 
     def _cmd_version(self, args: str, state: SessionState) -> str:
         from hermes_cli.version_info import get_version_info

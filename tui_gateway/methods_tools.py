@@ -751,7 +751,17 @@ def _dispatch_skill(rid, params, session, name, arg):
 
 
 def _cmd_queue(rid, params, session, name, arg):
-    return _ok(rid, {"type": "send", "message": arg}) if arg else _err(rid, 4004, "usage: /queue <prompt>")
+    """``/queue <prompt>`` submits a prompt; the management verbs act on the session queue.
+
+    The gateway's queue only holds prompts accepted mid-turn, so a bare prompt still goes out
+    as an ordinary turn — the surface queues it client-side when the session is busy. The verbs
+    the registry advertises (``list``/``clear``/``rm``/``move``/``edit``/``add``) are parsed by
+    the shared grammar, so a surface can no longer forward a verb to the model as a prompt.
+    """
+    output, prompt = dispatch_queue_command(session or {}, arg)
+    if prompt is not None:
+        return _ok(rid, {"type": "send", "message": prompt})
+    return _exec_out(rid, output)
 
 
 def _prompt_builtin(module: str, fn: str, kw: str = ""):

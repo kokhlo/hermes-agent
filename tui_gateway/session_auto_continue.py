@@ -18,6 +18,10 @@ from .method_ctx import bind_module
 # recovered partial transcript speak for itself — the user can ask to continue manually.
 _AUTO_CONTINUE_FRESHNESS_MINUTES_DEFAULT = 15
 
+# Distinguishes "this envelope had no text recorded" from "its text is None" when comparing
+# a queue before and after a mutation.
+_MISSING = object()
+
 
 def _auto_continue_config() -> tuple[bool, float, int]:
     """(enabled, freshness window in seconds, max attempts) from ``desktop.auto_continue`` in config.yaml."""
@@ -219,6 +223,130 @@ def _ac_set_queue(session: dict, entries: list) -> None:
         session["queued_prompts"] = entries[1:]
     else:
         session.pop("queued_prompts", None)
+
+
+def _with(lock, fn):
+    """Run ``fn()`` holding ``lock``; ``contextlib.suppress``-free so the value passes through."""
+    with lock:
+        return fn()
+
+
+def _retire_queued_user_rows(session: dict, envelopes: list) -> None:
+    """Deactivate the accept-time transcript rows of queued prompts that will never drain.
+
+    A queued envelope's row is written the moment it is accepted, so removing the envelope
+    without retiring its row would leave a user message in the transcript that no turn ever
+    runs — a prompt the user cancelled, still sitting in the chat. Rows are deactivated, never
+    deleted, matching the drain's own re-placement contract.
+    """
+    retired = [e for e in envelopes if isinstance(e, dict)]
+    if not retired:
+        return
+    with _session_db(session) as db:
+        if db is None:
+            return
+        for envelope in retired:
+            staged = envelope.get("_submit_user_row")
+            if not (isinstance(staged, dict) and isinstance(staged.get("_row_id"), int)):
+                continue
+            try:
+                # A rotation or compaction can have re-sequenced the row away already; resolve
+                # the live id so we never deactivate a row that has been superseded.
+                key = _submit_row_owner_key(staged, session)
+                live_id = db.resolve_active_row_id(key, staged["_row_id"])
+                if live_id is not None:
+                    db.deactivate_message(key, live_id)
+            except Exception:
+                logger.debug("retiring a cancelled queued-prompt row failed", exc_info=True)
+
+
+def _rewrite_queued_user_rows(session: dict, envelopes: list) -> None:
+    """Keep the accept-time transcript rows of edited queued prompts in step with their text.
+
+    An edit changes what the prompt will say but not that it is queued, so the row stays
+    active — only its content moves, mirroring the merge-sync in ``_persist_queued_user_row``.
+    A row that no longer resolves is dropped from the envelope so the drained turn writes its
+    own instead of claiming a durable row that does not exist.
+    """
+    edited = [e for e in envelopes if isinstance(e, dict)]
+    if not edited:
+        return
+    with _session_db(session) as db:
+        if db is None:
+            return
+        for envelope in edited:
+            staged = envelope.get("_submit_user_row")
+            if not (isinstance(staged, dict) and isinstance(staged.get("_row_id"), int)):
+                continue
+            try:
+                key = _submit_row_owner_key(staged, session)
+                live_id = db.resolve_active_row_id(key, staged["_row_id"])
+                if live_id is not None and db.set_user_message_content(key, live_id, envelope["text"]):
+                    staged["_row_id"], staged["content"] = live_id, envelope["text"]
+                    continue
+            except Exception:
+                logger.debug("updating an edited queued-prompt row failed", exc_info=True)
+            envelope.pop("_submit_user_row", None)
+
+
+def dispatch_queue_command(session: dict, arg: str) -> tuple[str, str | None]:
+    """Apply one ``/queue`` invocation to this session's queue.
+
+    Returns ``(output, enqueue)``. ``enqueue`` carries text that is still a prompt — the
+    caller submits it as a normal turn, since the gateway's queue is only populated by
+    mid-turn accepts and there is no reader for it on an idle session.
+
+    The grammar comes from ``hermes_cli.queue_command`` so the TUI, the desktop and the CLI
+    agree on which word manages the queue; only the queue and the rendering are the
+    gateway's. Mutations run under ``history_lock``, the same lock a drain's claim takes, so a
+    turn cannot claim a half-edited queue.
+    """
+    from hermes_cli import queue_command
+
+    def _entries() -> list:
+        head = session.get("queued_prompt")
+        return ([head] if head else []) + list(session.get("queued_prompts") or [])
+
+    def _snapshot() -> list:
+        lock = session.get("history_lock")
+        return _entries() if lock is None else _with(lock, _entries)
+
+    def _mutate(change):
+        lock = session.get("history_lock")
+        if lock is None:
+            before, after = _entries(), list(change(_entries()))
+            return before, after
+        return _with(lock, lambda: _mutate_locked(change))
+
+    def _mutate_locked(change):
+        before = _entries()
+        texts_before = {id(entry): entry.get("text") for entry in before}
+        after = list(change(list(before)))
+        # Identity, not equality: an edit rewrites an envelope's text in place (as the
+        # consecutive-text merge in _enqueue_prompt already does), so two envelopes can be
+        # value-equal while only one is really gone.
+        surviving = {id(entry) for entry in after}
+        dropped = [entry for entry in before if id(entry) not in surviving]
+        rewritten = [entry for entry in after
+                     if texts_before.get(id(entry), _MISSING) != entry.get("text")]
+        if dropped:
+            _retire_queued_user_rows(session, dropped)
+        if rewritten:
+            _rewrite_queued_user_rows(session, rewritten)
+        _ac_set_queue(session, after)
+        return before, after
+
+    result = queue_command.apply_queue_command(
+        queue_command.parse_queue_command(arg),
+        snapshot=_snapshot,
+        mutate=_mutate,
+        text_of=lambda envelope: str(envelope.get("text") or ""),
+        # In place, so the envelope keeps its transport, attachments and durable row.
+        with_text=lambda envelope, text: (envelope.__setitem__("text", text) or envelope),
+        format_item=lambda envelope: queue_command.preview(
+            str(envelope.get("text") or "").replace(chr(10), " ")),
+    )
+    return result.output, result.enqueue
 
 
 def _interrupt_busy_session(sid: str, session: dict, agent: Any) -> None:

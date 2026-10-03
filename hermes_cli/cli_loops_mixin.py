@@ -10,6 +10,7 @@ import threading
 import time
 
 from agent.i18n import t
+from hermes_cli import queue_command
 from rich.markup import escape as _escape
 
 
@@ -29,30 +30,21 @@ def _queue_usage() -> str:
 def _parse_queue_index(token: str) -> int | None:
     """1-based queue index from one whitespace-free token, or None when it isn't one.
 
-    ``str.isdigit()`` alone is not enough: it accepts characters ``int()`` rejects
-    (``²``, ``②``), and ``int()`` also refuses digit strings past Python's
-    conversion limit. A ValueError here would escape the slash handler and take
-    down the prompt_toolkit app, so every queue index goes through this.
+    Re-exported from :mod:`hermes_cli.queue_command`, which owns the grammar every surface
+    shares; kept here because the mixin's own handlers read it by name.
     """
-    if not token.isdigit():
-        return None
-    try:
-        return int(token)
-    except ValueError:
-        return None
+    return queue_command.parse_queue_index(token)
 
 
-# management verb -> (handler, takes a leading item index). Verbs without an index are
+def _queue_render(key: str, fallback: str) -> str:
+    return t(key)
+
+
+# Management verb -> (handler, takes a leading item index). Verbs without an index are
 # only management when they stand alone; index verbs when a number follows or when the
-# verb stands alone (the handler then prints its usage line).
-_QUEUE_VERBS: dict[str, tuple[str, bool]] = {
-    "list": ("_queue_list", False), "ls": ("_queue_list", False), "show": ("_queue_list", False),
-    "clear": ("_queue_clear", False),
-    "edit": ("_queue_edit", True), "set": ("_queue_edit", True),
-    "rm": ("_queue_remove", True), "remove": ("_queue_remove", True), "delete": ("_queue_remove", True),
-    "del": ("_queue_remove", True), "pop": ("_queue_remove", True),
-    "move": ("_queue_move", True),
-}
+# verb stands alone (the handler then prints its usage line). The routing itself lives in
+# hermes_cli.queue_command so every surface agrees on which word means what.
+_QUEUE_VERBS: dict[str, tuple[str, bool]] = queue_command.VERB_TABLE
 
 
 def _print_decision_message(decision: dict) -> bool:
@@ -428,7 +420,10 @@ class CLILoopsMixin:
         """``/queue <prompt>`` enqueues; a leading management verb whose arguments fit
         (``list``/``clear`` alone, ``edit N …``/``rm N``/``move A B``) manages the queue
         instead. Anything else — ``clear the logs``, ``edit the config`` — is still a prompt;
-        ``/queue add <prompt>`` forces enqueueing."""
+        ``/queue add <prompt>`` forces enqueueing.
+
+        The grammar is shared with every other surface (``hermes_cli.queue_command``); this
+        handler only supplies the CLI's queue and its rendering."""
         from cli import _cprint, _slash_args
         payload = _slash_args(cmd_original)
         if not payload:
