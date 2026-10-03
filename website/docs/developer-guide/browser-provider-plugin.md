@@ -52,12 +52,22 @@ provides_browser_providers:
 `__init__.py`:
 
 ```python
-from plugins.browser.my_backend.provider import MyBackendProvider
+# plugins/browser/my-backend/__init__.py
+from .provider import MyBackendProvider
 
 
 def register(ctx) -> None:
     ctx.register_browser_provider(MyBackendProvider())
 ```
+
+:::note
+That import must stay **relative**. A directory plugin is imported as its own
+package rooted at the plugin directory, for bundled and user plugins alike, so
+`plugins.browser.my_backend` only exists inside the bundled `<repo>/plugins`
+tree — which a user plugin at `~/.hermes/plugins/browser/<name>/` is not part
+of. Written as an absolute import, `register(ctx)` fails to load and the
+provider silently stays out of the registry.
+:::
 
 ## The BrowserProvider ABC
 

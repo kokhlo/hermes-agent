@@ -115,13 +115,22 @@ class MyBackendWebSearchProvider(WebSearchProvider):
 
 ```python
 # plugins/web/my-backend/__init__.py
-from plugins.web.my_backend.provider import MyBackendWebSearchProvider
+from .provider import MyBackendWebSearchProvider
 
 
 def register(ctx) -> None:
     """Plugin entry point — called once at load time."""
     ctx.register_web_search_provider(MyBackendWebSearchProvider())
 ```
+
+:::note
+That import must stay **relative**. A directory plugin is imported as its own
+package rooted at the plugin directory, for bundled and user plugins alike, so
+`plugins.web.my_backend` only exists inside the bundled `<repo>/plugins` tree —
+which a user plugin at `~/.hermes/plugins/web/<name>/` is not part of. Written
+as an absolute import, `register(ctx)` fails to load and the provider silently
+stays out of the registry.
+:::
 
 ## plugin.yaml
 
