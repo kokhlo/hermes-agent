@@ -52,10 +52,82 @@ export function mediaKind(path: string): MediaKind {
 // MEDIA delivery path routes these to a preview instead of a download link.
 const MARKDOWN_EXTENSIONS = new Set(['md', 'markdown', 'mdown', 'mkd'])
 
+// Documents and data files the preview rail and media pipeline both know how to
+// open, so a link to one needs no inline player — only a view-time door.
+const FILE_LINK_EXTENSIONS = new Set([
+  ...MARKDOWN_EXTENSIONS,
+  ...Object.keys(MEDIA_BY_EXT),
+  '7z',
+  'bz2',
+  'cfg',
+  'conf',
+  'csv',
+  'doc',
+  'docx',
+  'gz',
+  'htm',
+  'html',
+  'ini',
+  'json',
+  'log',
+  'odt',
+  'pdf',
+  'ppt',
+  'pptx',
+  'rtf',
+  'tar',
+  'toml',
+  'tsv',
+  'txt',
+  'xls',
+  'xlsx',
+  'xml',
+  'yaml',
+  'yml',
+  'zip'
+])
+
 export function isMarkdownDocumentPath(path: string): boolean {
   const ext = path.split(/[?#]/, 1)[0]?.split('.').pop()?.toLowerCase()
 
   return ext ? MARKDOWN_EXTENSIONS.has(ext) : false
+}
+
+// Any `scheme:` prefix — `https:`, `mailto:`, `file:`, `data:`. A target that
+// carries one is a URI, never a workspace-relative file path.
+const URI_SCHEME_RE = /^[a-z][a-z0-9+.-]*:/i
+
+/**
+ * True when `path` is a workspace-relative destination to a file the agent
+ * could have written: `docs/report.md`, `./notes.txt`, `../out/trace.log`.
+ *
+ * Such a link names a file on the AGENT's machine, so it must reach the preview
+ * pipeline exactly like an absolute path does — rendered bare it is a dead
+ * anchor, refused by both Streamdown's URL hardening and Electron's
+ * window-open policy, and the deliverable is unclickable in chat (#131842).
+ * Resolution stays deferred to VIEW time against the session's cwd, so one
+ * transcript opens from any machine.
+ *
+ * The known-extension requirement is what separates a file from a web-style
+ * relative link. `[plans](pricing)` and `[release](release.v2)` name routes and
+ * labels; routing them to a preview would trade a live link for a dead one.
+ */
+export function isRelativeFileLinkTarget(path: string): boolean {
+  const target = path.trim()
+
+  if (!target || target.startsWith('#') || target.startsWith('//') || URI_SCHEME_RE.test(target)) {
+    return false
+  }
+
+  // An absolute path has its own (already working) branch; `~/` and `.hidden`
+  // would read as a `.`-prefixed relative name here.
+  if (/^(?:\/|~|[a-z]:[\\/]|\\\\)/i.test(target) || target.startsWith('..')) {
+    return false
+  }
+
+  const ext = target.split(/[?#]/, 1)[0]?.split('.').pop()?.toLowerCase()
+
+  return ext ? FILE_LINK_EXTENSIONS.has(ext) : false
 }
 
 export function mediaMime(path: string): string {

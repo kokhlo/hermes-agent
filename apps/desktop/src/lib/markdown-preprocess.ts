@@ -2,7 +2,7 @@ import { normalizeMathDelimiters } from '@assistant-ui/react-streamdown'
 
 import { isLikelyProseFence, sanitizeLanguageTag } from '@/lib/markdown-code'
 import { clampHtmlNestingDepth } from '@/lib/markdown-html-depth'
-import { mediaKind, mediaMarkdownHref } from '@/lib/media'
+import { isRelativeFileLinkTarget, mediaKind, mediaMarkdownHref } from '@/lib/media'
 import { previewMarkdownHref } from '@/lib/preview-targets'
 import { stripPreviewTargets } from '@/lib/preview-targets'
 import { linkifySessionRefs } from '@/lib/session-refs'
@@ -221,8 +221,14 @@ const FENCE_TOGGLE_RE = /^[ \t]*(?:```|~~~)/
 // CommonMark angle-bracket destinations (`[notes](<~/My Notes/todo.md>`) are
 // matched separately so paths with spaces route to the preview pipeline too
 // (#102782) — `routeFileLinksToPreview` strips the surrounding `<>`.
+// A workspace-relative destination (`docs/report.md`, `./notes.txt`) is the
+// same kind of target written without a root: the file lives in the session's
+// working directory. The third alternative below matches those; whether the
+// destination really is a file (rather than a web-style relative link like
+// `[plans](pricing)`) is decided by `isRelativeFileLinkTarget`, which only the
+// callback consults — the charset here can't know the extension vocabulary.
 const FILE_LINK_RE =
-  /(?<!!)\[(?<label>[^\]\n]+)\]\((?<target>(?:<(?:file:\/\/|\/|~\/|[a-z]:[\\/])[^>]*>)|(?:file:\/\/|\/|~\/|[a-z]:[\\/])[^)\s]*)\)/gi
+  /(?<!!)\[(?<label>[^\]\n]+)\]\((?<target>(?:<(?:file:\/\/|\/|~\/|[a-z]:[\\/])[^>]*>)|(?:file:\/\/|\/|~\/|[a-z]:[\\/])[^)\s]*|(?<relative><[^>\n]+>|(?:\.\.?[\\/]|[^()\s<>:'"]*[\\/])?[^()\s<>:'"]+\.[A-Za-z0-9]{1,8}(?:[?#][^()\s<>]*)?))\)/gi
 
 // A transcript directive on its own line: `::name{...}`. Attribute values are
 // prose the model wrote (a task brief, a question) and read as markdown to the
@@ -518,10 +524,18 @@ function escapeUnknownHtmlLikeTags(text: string): string {
 // which resolve the path at VIEW time against the session's backend — local
 // reads the file directly, remote fetches it over the authenticated /api/fs
 // bridge — so the same transcript works from every machine that opens it.
+// A workspace-relative destination routes the same way, but only once
+// `isRelativeFileLinkTarget` confirms it names a file: the regex alternative
+// that finds it can't tell `docs/report.md` from a web-style `[plans](pricing)`,
+// and rewriting the latter would leave a live link pointing at a preview.
 function routeFileLinksToPreview(text: string): string {
   return text.replace(FILE_LINK_RE, (match: string, ...args: unknown[]) => {
-    const groups = args.at(-1) as { label: string; target: string }
+    const groups = args.at(-1) as { label: string; relative?: string; target: string }
     const target = groups.target.replace(/^<|>$/g, '')
+
+    if (groups.relative !== undefined && !isRelativeFileLinkTarget(target)) {
+      return match
+    }
 
     const href = mediaKind(target) === 'file' ? previewMarkdownHref(target) : mediaMarkdownHref(target)
 

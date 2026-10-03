@@ -63,7 +63,7 @@ describe('MarkdownLink filesystem hrefs', () => {
     expect(container.querySelector('a[href="/tmp/demo.mp4"]')).toBeNull()
   })
 
-  it('leaves anchors and relative links out of the preview pipeline', () => {
+  it('routes a workspace-relative file link but leaves fragments and web links alone', async () => {
     render(
       <MarkdownTextContent
         isRunning={false}
@@ -71,10 +71,24 @@ describe('MarkdownLink filesystem hrefs', () => {
       />
     )
 
-    // Fragment anchors survive untouched; relative links are NOT rewritten
-    // (they keep Streamdown's pre-existing handling) — neither gains a
-    // preview affordance.
+    // A relative destination names a file in the session's working directory,
+    // so it reaches the preview rail exactly like an absolute path does
+    // (#131842) — rendered bare, Electron's window-open policy refused the
+    // click and the deliverable was unclickable. A fragment is the app's own
+    // HashRouter and an https href is the web; neither is a file.
+    await screen.findByText('guide.md')
+
+    const anchors = screen.getAllByRole('link').map(link => link.getAttribute('href'))
+
+    expect(anchors).toEqual(['#section-2', 'https://example.com/'])
+  })
+
+  it('leaves a relative link with no file extension out of the preview pipeline', () => {
+    // `[plans](pricing)` is a web-style relative link, not a file: routing it
+    // to a preview would trade a live link for a dead one.
+    render(<MarkdownTextContent isRunning={false} text={'[plans](pricing)'} />)
+
     expect(screen.queryByRole('button', { name: 'Open preview' })).toBeNull()
-    expect(document.querySelector('a[href="#section-2"]')).not.toBeNull()
+    expect(screen.queryByRole('link')).toBeNull()
   })
 })
