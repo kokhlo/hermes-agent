@@ -81,20 +81,13 @@ _CMDPOS_WRAPPED = (
     + r'(?:sudo\s+(?:-[^\s]+\s+)*|env\s+(?:\w+=\S*\s*)*|(?:exec|nohup|setsid|time)\s+)+' r'\s*'
 )
 
-# Command position does not tell a DEFINITION from an INVOCATION: a verb in command position can be
-# a shell FUNCTION NAME or a VARIABLE NAME instead of a program to run, and neither runs it —
-# `halt() { ...; }` (a common error-helper idiom) and `halt=1` are the spellings that cost an agent a
-# false block, and an agent that cannot write documentation about these verbs cannot report a real
-# block either. Two forms are excluded, each only where no wrapper can turn it back into an invocation:
-#   * an empty paren pair — `halt()`, `halt ()`, `halt( )`, and the brace-expansion variant that puts a
-#     newline inside the parens. `halt (foo)` is a syntax error in bash/sh, so a NON-empty pair keeps
-#     blocking; no newline is allowed before the `(` (`halt` and `()` as two commands make `halt` the
-#     invocation); and zsh ACCEPTS `sudo halt () { :; }` as a command, so the exclusion is not applied
-#     when _CMDPOS consumed a wrapper — there the verb really is the program being run.
-#   * a lone assignment word — `halt=1`, `halt=x`, `halt=$(cmd)`, where `=` TOUCHES the verb, because
-#     `halt =1` passes `=1` as an ARGUMENT and does run halt. The assignment must run to the end of the
-#     command, so `halt=x halt` and `halt=1 reboot` (the verb as an env prefix) still block.
-# Applies to the bare verbs only; `init 0`, `systemctl poweroff` and friends carry their own operands.
+# A verb in command position can be a shell FUNCTION NAME or a VARIABLE NAME, and neither runs it:
+# `halt() { ...; }` is a common error-helper idiom and `halt=1` is an assignment, yet both read as a
+# host shutdown. Excluded: an empty paren pair, and a lone assignment word whose `=` touches the verb
+# and runs to the end of the command. Kept blocking, each for a reason measurable with `-n`:
+# `halt (foo)` is a syntax error in bash/sh; `halt =1` passes `=1` as an argument and does run halt;
+# `halt=x halt` reaches an invocation; and behind a wrapper zsh accepts `sudo halt () { :; }` as a
+# command, which is why only the unwrapped rule carries the exclusion.
 _NOT_A_VERB_INVOCATION = (
     r'(?![ \t]*\([ \t\r\n]*\))'
     r'(?!(?:=[^ \t;&|\n]*[ \t]*(?:$|[;&|\n])))'
