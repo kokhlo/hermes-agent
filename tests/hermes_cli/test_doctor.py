@@ -24,6 +24,7 @@ import shutil
 from hermes_cli import doctor_tools
 from hermes_cli import doctor_state
 from hermes_cli import doctor_platform
+from hermes_cli import macos_tcc_anchor as tcc
 from hermes_cli import doctor_config
 from tools import browser_tool_install as bt_install
 
@@ -1385,6 +1386,77 @@ class TestDoctorStaleMaxIterationsDrift:
             monkeypatch, tmp_path, fix=False, ghost=None, cfg_turns=400,
         )
         assert "shadows" not in out
+
+
+class TestDoctorTccAnchorStaysInsideProjectRoot:
+    """``doctor --fix`` anchors the venv under PROJECT_ROOT — never the checkout the
+    anchor module happens to live in.
+
+    Every other check in this file threads PROJECT_ROOT through; the TCC anchor used to
+    resolve its own root from ``__file__``, so a test that pointed PROJECT_ROOT somewhere
+    else still had the checkout's real ``venv/bin/python`` replaced with a signed copy and
+    a ``.tcc-anchor-source`` marker written beside it (#132178).
+    """
+
+    @staticmethod
+    def _uv_managed_venv(parent, name="checkout"):
+        """A venv shaped like the uv layout the anchor recognises, symlinked into a store.
+
+        The store entry is a placeholder, not a copy of a real interpreter: the destructive
+        install is stubbed in these tests, so nothing ever executes it, and reaching for
+        ``sys.executable`` would drag the live Hermes home into the fixture.
+        """
+        store_bin = parent / "uv" / "python" / "cpython-3.11-macos-aarch64-none" / "bin"
+        store_bin.mkdir(parents=True)
+        interpreter = store_bin / "python3.11"
+        interpreter.write_bytes(b"")
+        venv = parent / name / "venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "pyvenv.cfg").write_text(f"home = {store_bin}\n", encoding="utf-8")
+        (venv / "bin" / "python").symlink_to(interpreter)
+        return venv
+
+    def test_fix_does_not_rewrite_a_venv_outside_project_root(self, monkeypatch, tmp_path):
+        venv = self._uv_managed_venv(tmp_path)
+        venv_py = venv / "bin" / "python"
+
+        # The root the anchor falls back to when a caller passes none: the module's own
+        # checkout. Relocate it so the fallback lands on our fixture instead of the repo.
+        monkeypatch.setattr(
+            tcc, "__file__", str(venv.parent / "hermes_cli" / "macos_tcc_anchor.py"))
+        monkeypatch.setattr(tcc, "is_macos", lambda: True)
+
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.setattr(doctor_mod, "PROJECT_ROOT", project)
+
+        anchored = []
+        monkeypatch.setattr(
+            tcc, "_install_anchor", lambda venv_dir, source: anchored.append(venv_dir))
+
+        doctor_platform.check_macos_tcc_anchor(should_fix=True)
+
+        assert anchored == []  # nothing to anchor: PROJECT_ROOT holds no venv
+        assert venv_py.is_symlink(), "checkout venv interpreter was replaced by a real file"
+        assert not (venv / "bin" / ".tcc-anchor-source").exists()
+
+    def test_fix_anchors_the_venv_under_project_root(self, monkeypatch, tmp_path):
+        venv = self._uv_managed_venv(tmp_path, name="project")
+        venv_py = venv / "bin" / "python"
+
+        monkeypatch.setattr(
+            tcc, "__file__", str(tmp_path / "elsewhere" / "hermes_cli" / "macos_tcc_anchor.py"))
+        monkeypatch.setattr(tcc, "is_macos", lambda: True)
+        monkeypatch.setattr(doctor_mod, "PROJECT_ROOT", venv.parent)
+
+        anchored = []
+        monkeypatch.setattr(
+            tcc, "_install_anchor", lambda venv_dir, source: anchored.append(venv_dir))
+
+        doctor_platform.check_macos_tcc_anchor(should_fix=True)
+
+        assert anchored == [venv]  # the requested root, not the module's checkout
+        assert venv_py.is_symlink()  # the stub stopped short of the real swap
 
 
 class TestDoctorLegacyCustomProvidersResidue:
