@@ -255,6 +255,49 @@ def is_gateway_supervisor_process(environ: Mapping[str, str] | None = None) -> b
                 or str(env.get(EXTERNAL_GATEWAY_SUPERVISOR_ENV, "")).strip().lower() in _TRUTHY)
 
 
+def _pid_environ(pid: int) -> dict[str, str] | None:
+    """Exec-time environment of *pid* (psutil, then /proc); ``None`` when unreadable."""
+    import contextlib
+    from pathlib import Path
+
+    with contextlib.suppress(Exception):
+        import psutil
+
+        return dict(psutil.Process(pid).environ())
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return None
+    env: dict[str, str] = {}
+    for part in raw.split(b"\x00"):
+        key, sep, value = part.partition(b"=")
+        if sep:
+            env[key.decode("utf-8", errors="replace")] = value.decode("utf-8", errors="replace")
+    return env
+
+
+def is_supervised_gateway_owner(pid: int | None) -> bool | None:
+    """Tri-state: is *pid* a gateway that a supervisor will KEEP running?
+
+    ``True`` the owner is itself service-launched, so it keeps serving through anything we do —
+    a retry cannot change the verdict. ``False`` the owner is a shell-launched process that can
+    genuinely exit, so retrying is meaningful. ``None`` the owner's environment is unreadable
+    (another UNIX user, hardened ``/proc``), which is exactly the duplicate-install shape: a
+    system-scope unit owns the host while the unit asking runs as the unprivileged user. An
+    unreadable environment is NOT evidence of a transient owner, so it never answers ``False``.
+
+    A second unit asking about an owner it cannot inspect would otherwise retry forever against a
+    service that never yields, and the generated unit pairs ``Restart=always`` with
+    ``RestartForceExitStatus=75`` and no start-rate limit, so every retry lands (#132286).
+    """
+    if pid is None or pid <= 0 or pid == os.getpid():
+        return None
+    env = _pid_environ(pid)
+    if env is None:
+        return None
+    return is_supervised_gateway_launch(env)
+
+
 def is_supervised_gateway_launch(environ: Mapping[str, str] | None = None) -> bool:
     """Return whether this gateway was launched by a generated service/launcher rather than a shell.
 

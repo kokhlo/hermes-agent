@@ -4358,10 +4358,39 @@ def _host_decision_exit_code(decision) -> int:
     already retries: systemd has ``RestartForceExitStatus=75`` with ``RestartSec=5``, the s6 finish
     script passes it through, and launchd relaunches a non-78 failure. Exit 0 would NOT do: s6
     parks a clean exit too.
+
+    "Ends the moment that process goes away" is the whole contract, so a verdict whose OWNER is
+    itself a supervised service is not transient at all: it serves now and after every retry, and
+    the generated unit pairs ``Restart=always`` with ``RestartForceExitStatus=75`` and no
+    start-rate limit, so retrying against it loops without bound (#132286 — a user-scope unit
+    asking about a system-scope owner, or any two units left installed for one host). Such a
+    refusal parks on 78 instead. An owner whose environment cannot be read is treated the same way:
+    an uninspectable owner is not evidence of one that will go away.
     """
+    if getattr(decision, "transient", False):
+        owner = getattr(decision, "owner", None)
+        if owner is not None and _owner_outlives_our_retry(owner):
+            logger.warning(
+                "gateway run refused: profile %r is served by another SUPERVISED gateway (%s); "
+                "parking this unit instead of retrying a verdict that cannot change",
+                getattr(owner, "profile_label", "default"), owner.describe(),
+            )
+            return GATEWAY_FATAL_CONFIG_EXIT_CODE
     if getattr(decision, "transient", False):
         return GATEWAY_SERVICE_RESTART_EXIT_CODE
     return GATEWAY_FATAL_CONFIG_EXIT_CODE
+
+
+def _owner_outlives_our_retry(owner) -> bool:
+    """True when *owner* is a supervised gateway, so retrying our refusal cannot change it.
+
+    ``True`` and ``None`` both park: an owner whose environment we cannot read is not proof of one
+    that goes away, and the unit pairs ``Restart=always`` with ``RestartForceExitStatus=75`` and no
+    start-rate limit, so a wrong ``False`` here is an unbounded loop rather than a delayed start.
+    """
+    from gateway.restart import is_supervised_gateway_owner
+
+    return is_supervised_gateway_owner(getattr(owner, "pid", None)) is not False
 
 
 def _attach_to_host_gateway_or_guard(force: bool = False, replace: bool = False) -> None:
