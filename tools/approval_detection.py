@@ -68,10 +68,36 @@ _WRITE_TARGET_BOUNDARY = r'(?=[\s;&|<>"\']|$)'
 # sudo/env/exec/nohup/setsid/time wrappers. Keeps shutdown/reboot rules from firing on "echo reboot" / "grep
 # 'shutdown' log". Real ;/&/| separators are converted to newlines by the quote-aware _mark_command_starts pass;
 # keeping them here mistakes quoted data (grep '(safe|rm -rf /)') for commands.
+_CMDPOS_START = r'(?:^|[\n`]|\$\()' r'\s*'  # start position, optional whitespace
 _CMDPOS = (
-    r'(?:^|[\n`]|\$\()' r'\s*'  # start position, optional whitespace
-    r'(?:sudo\s+(?:-[^\s]+\s+)*)?' r'(?:env\s+(?:\w+=\S*\s+)*)?'  # optional sudo with flags, env VAR=VAL pairs
-    r'(?:(?:exec|nohup|setsid|time)\s+)*' r'\s*'  # optional wrapper commands
+    _CMDPOS_START
+    + r'(?:sudo\s+(?:-[^\s]+\s+)*)?' r'(?:env\s+(?:\w+=\S*\s+)*)?'  # optional sudo with flags, env VAR=VAL pairs
+    + r'(?:(?:exec|nohup|setsid|time)\s+)*' r'\s*'  # optional wrapper commands
+)
+# The same wrappers, but at least one REQUIRED. _CMDPOS makes them optional, so a rule that needs to
+# know whether a wrapper was consumed cannot reuse it — see the shutdown/reboot rule below.
+_CMDPOS_WRAPPED = (
+    _CMDPOS_START
+    + r'(?:sudo\s+(?:-[^\s]+\s+)*|env\s+(?:\w+=\S*\s*)*|(?:exec|nohup|setsid|time)\s+)+' r'\s*'
+)
+
+# Command position does not tell a DEFINITION from an INVOCATION: a verb in command position can be
+# a shell FUNCTION NAME or a VARIABLE NAME instead of a program to run, and neither runs it —
+# `halt() { ...; }` (a common error-helper idiom) and `halt=1` are the spellings that cost an agent a
+# false block, and an agent that cannot write documentation about these verbs cannot report a real
+# block either. Two forms are excluded, each only where no wrapper can turn it back into an invocation:
+#   * an empty paren pair — `halt()`, `halt ()`, `halt( )`, and the brace-expansion variant that puts a
+#     newline inside the parens. `halt (foo)` is a syntax error in bash/sh, so a NON-empty pair keeps
+#     blocking; no newline is allowed before the `(` (`halt` and `()` as two commands make `halt` the
+#     invocation); and zsh ACCEPTS `sudo halt () { :; }` as a command, so the exclusion is not applied
+#     when _CMDPOS consumed a wrapper — there the verb really is the program being run.
+#   * a lone assignment word — `halt=1`, `halt=x`, `halt=$(cmd)`, where `=` TOUCHES the verb, because
+#     `halt =1` passes `=1` as an ARGUMENT and does run halt. The assignment must run to the end of the
+#     command, so `halt=x halt` and `halt=1 reboot` (the verb as an env prefix) still block.
+# Applies to the bare verbs only; `init 0`, `systemctl poweroff` and friends carry their own operands.
+_NOT_A_VERB_INVOCATION = (
+    r'(?![ \t]*\([ \t\r\n]*\))'
+    r'(?!(?:=[^ \t;&|\n]*[ \t]*(?:$|[;&|\n])))'
 )
 
 
@@ -122,7 +148,10 @@ HARDLINE_PATTERNS = [
     # Kill every process on the system — anchor the command-name token so `echo "kill -1 sends SIGHUP to
     # everything"` doesn't trip (#93392).
     (_CMDPOS + r'kill\s+(-[^\s]+\s+)*-1\b', "kill all processes"),
-    (_CMDPOS + r'(shutdown|reboot|halt|poweroff)\b', "system shutdown/reboot"),
+    # Two rules, not one: the wrapped form never gets the exclusion (zsh runs `sudo halt () { :; }`
+    # as a command), and only the bare form can be a definition or an assignment.
+    (_CMDPOS_WRAPPED + r'(shutdown|reboot|halt|poweroff)\b', "system shutdown/reboot"),
+    (_CMDPOS + r'(shutdown|reboot|halt|poweroff)\b' + _NOT_A_VERB_INVOCATION, "system shutdown/reboot"),
     (_CMDPOS + r'init\s+[06]\b', "init 0/6 (shutdown/reboot)"),
     (_CMDPOS + r'systemctl\s+(poweroff|reboot|halt|kexec)\b', "systemctl poweroff/reboot"),
     (_CMDPOS + r'telinit\s+[06]\b', "telinit 0/6 (shutdown/reboot)"),
