@@ -42,6 +42,17 @@ def _reset_systemd_scope_cache():
     _pr._SYSTEMD_SCOPE_AVAILABLE = original
 
 
+def _run_call_argv(args) -> list:
+    """The argv a patched ``subprocess.run`` actually received.
+
+    Callers spell it both ways — ``run(argv, ...)`` and ``run(binary, arg, ...)`` —
+    so normalize to a list instead of guessing which one a fake is looking at.
+    """
+    if len(args) == 1 and isinstance(args[0], (list, tuple)):
+        return list(args[0])
+    return [str(arg) for arg in args]
+
+
 def _make_session(
     sid="proc_test123",
     command="echo hello",
@@ -2920,9 +2931,7 @@ class TestSystemdCgroupIsolation:
         argv_history = []
 
         def fake_run(args, **kwargs):
-            # subprocess.run is called both as run(argv) and run(binary, ...);
-            # normalize either shape to the argv list.
-            argv = list(args[0]) if len(args) == 1 and isinstance(args[0], (list, tuple)) else [str(a) for a in args]
+            argv = _run_call_argv(args)
             if "--scope" not in argv:
                 return subprocess.CompletedProcess(args=args[0], returncode=0)
             argv_history.append(argv)
@@ -2960,9 +2969,7 @@ class TestSystemdCgroupIsolation:
         probe_calls = []
 
         def fake_run(args, **kwargs):
-            # subprocess.run is called both as run(argv) and run(binary, ...);
-            # normalize either shape to the argv list.
-            argv = list(args[0]) if len(args) == 1 and isinstance(args[0], (list, tuple)) else [str(a) for a in args]
+            argv = _run_call_argv(args)
             if "--scope" in argv:
                 probe_calls.append(argv)
             return subprocess.CompletedProcess(
