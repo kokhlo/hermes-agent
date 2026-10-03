@@ -164,16 +164,37 @@ def _worker_memory_max_bytes() -> int:
     return min(override_bound, safe_bound) if override_bound else safe_bound
 
 
+_SYSTEMD_EXPAND_ENV_UNSUPPORTED: Optional[bool] = None
+
+
 def _systemd_scope_argv(binary: str, unit_name: str, *argv: str) -> List[str]:
     """``systemd-run --user --scope`` argv shared by the probe and real spawns.
     ``--collect`` self-cleans the scope after exit; ``--unit`` names it for systemctl.
     No ``OOMPolicy=``: transient scopes reject it on systemd <253 (#102486)."""
     return [
         binary, "--user", "--scope", "--quiet", "--unit", unit_name, "--collect",
+        *([] if _SYSTEMD_EXPAND_ENV_UNSUPPORTED else ["--expand-environment=no"]),
         "--property", "MemoryAccounting=yes",
         "--property", f"MemoryMax={_worker_memory_max_bytes()}",
         "--", *argv,
     ]
+
+
+def _systemd_rejected_expand_environment(result: "subprocess.CompletedProcess") -> bool:
+    """Whether *result* is this ``systemd-run`` refusing ``--expand-environment=``.
+
+    The option arrived in systemd 254 and defaults to ``yes``, so under
+    ``--scope`` ``systemd-run`` expands the command line itself: ``$$`` reaches
+    the worker's login shell as ``$`` and ``${VAR}`` is substituted out of the
+    command line before the shell runs.  Up to 257 scopes were exempt from that
+    default for backward compatibility; since 258 they are not, so a scoped
+    command stopped being byte-identical to an unscoped one on systemd newer
+    than the hosts this was reported from.  Passing the flag states the intent
+    instead of inheriting a default that has already flipped once and warns it
+    may again.  Binaries older than 254 never expanded under ``--scope`` and
+    reject the option outright; the rejection names the option, which is what
+    we match on — the surrounding wording is localized, the option name is not."""
+    return b"expand-environment" in ((result.stderr or b"") + (result.stdout or b""))
 
 
 def _default_user_runtime_dir() -> Path:
@@ -247,8 +268,12 @@ def _systemd_run_user_scope_available() -> bool:
     ``Failed to connect to user bus``), so a cheap probe is run and cached.
 
     Use ``/bin/sh -c 'exit 0'``: NixOS provides ``/bin/sh`` but not ``/bin/true``
-    (#105365), regardless of the gateway service's PATH."""
-    global _SYSTEMD_SCOPE_AVAILABLE, _SYSTEMD_SCOPE_PROBED_AT
+    (#105365), regardless of the gateway service's PATH.
+
+    The probe doubles as the ``--expand-environment=no`` capability check: a
+    systemd older than 254 rejects that option, and re-probing without it is
+    how one host's systemd version decides every later spawn."""
+    global _SYSTEMD_SCOPE_AVAILABLE, _SYSTEMD_SCOPE_PROBED_AT, _SYSTEMD_EXPAND_ENV_UNSUPPORTED
     verdict = _systemd_scope_cached()
     if verdict is not None:
         return verdict
@@ -275,10 +300,24 @@ def _systemd_run_user_scope_available() -> bool:
                     )
                     available = result.returncode == 0
                     if not available:
-                        logger.debug(
-                            "systemd-run --user --scope probe failed (rc=%s): %s",
-                            result.returncode, (result.stderr or b"").decode("utf-8", "replace").strip(),
-                        )
+                        if _systemd_rejected_expand_environment(result):
+                            # This systemd predates the flag and never expanded
+                            # under --scope anyway: remember it, drop the flag,
+                            # and re-probe so the host is not written off as
+                            # scope-less over one unknown option.
+                            _SYSTEMD_EXPAND_ENV_UNSUPPORTED = True
+                            result = subprocess.run(
+                                _systemd_scope_argv(binary, probe_unit, "/bin/sh", "-c", "exit 0"),
+                                capture_output=True,
+                                timeout=3,
+                                env=systemd_user_bus_env(),
+                            )
+                            available = result.returncode == 0
+                        if not available:
+                            logger.debug(
+                                "systemd-run --user --scope probe failed (rc=%s): %s",
+                                result.returncode, (result.stderr or b"").decode("utf-8", "replace").strip(),
+                            )
             except Exception as exc:
                 logger.debug("systemd-run --user --scope probe error: %s", exc)
         _SYSTEMD_SCOPE_AVAILABLE = available

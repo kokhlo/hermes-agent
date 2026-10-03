@@ -2863,6 +2863,121 @@ class TestSystemdCgroupIsolation:
 
         assert pr._stop_systemd_unit("hermes-worker-gone.scope") is True
 
+    @pytest.mark.platforms("linux")
+    def test_scoped_spawn_keeps_shell_expansion_for_the_worker(self, registry, monkeypatch, _gateway_identity):
+        """A scoped background command must reach the worker's shell unchanged.
+
+        Since systemd 254 ``systemd-run`` expands the command line itself under
+        ``--scope``, so without an explicit opt-out ``$$`` arrives as ``$`` and
+        ``${VAR}`` is substituted before the login shell ever sees it (#132385).
+        """
+        fake_popen, captured = self._fake_popen_capture()
+
+        monkeypatch.setattr("tools.process_registry._find_shell", lambda: "/bin/bash")
+        monkeypatch.setattr(
+            "tools.process_registry._systemd_run_user_scope_available",
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            "tools.process_registry._SYSTEMD_EXPAND_ENV_UNSUPPORTED", None
+        )
+        monkeypatch.setattr(
+            "gateway.restart.is_gateway_supervisor_process", lambda environ=None: True
+        )
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/systemd-run")
+
+        with (
+            patch("subprocess.Popen", side_effect=fake_popen),
+            patch("threading.Thread", return_value=MagicMock()),
+            patch.object(registry, "_write_checkpoint"),
+        ):
+            registry.spawn_local('echo "pid=$$ home=$HOME"', cwd="/tmp")
+
+        argv = captured["argv"]
+        assert "--expand-environment=no" in argv, argv
+        # ... and the flag is systemd's, so it must sit before the separator:
+        # anything after ``--`` is the command's own argv.
+        assert argv.index("--expand-environment=no") < argv.index("--"), argv
+        sep_idx = argv.index("--")
+        # The command arrives as one login-shell argument, dollar signs and all.
+        assert 'set +m; echo "pid=$$ home=$HOME"' in argv[sep_idx:], argv
+
+    @pytest.mark.platforms("linux")
+    def test_probe_recovers_when_systemd_rejects_expand_environment(self, monkeypatch):
+        """A systemd older than 254 must not be written off as scope-less.
+
+        It rejects the option rather than the scope, and it never expanded under
+        ``--scope``, so dropping the flag and re-probing recovers the host's
+        scope isolation instead of degrading every spawn into the gateway cgroup.
+        """
+        import tools.process_registry as pr
+
+        monkeypatch.setattr(pr, "_SYSTEMD_SCOPE_AVAILABLE", None)
+        monkeypatch.setattr(pr, "_SYSTEMD_SCOPE_PROBED_AT", 0.0)
+        monkeypatch.setattr(pr, "_SYSTEMD_EXPAND_ENV_UNSUPPORTED", None)
+        # Only the scope probes count: patching subprocess.run is process-wide, and
+        # unrelated callers (a lazy git config pre-read, for one) share it.
+        argv_history = []
+
+        def fake_run(args, **kwargs):
+            # subprocess.run is called both as run(argv) and run(binary, ...);
+            # normalize either shape to the argv list.
+            argv = list(args[0]) if len(args) == 1 and isinstance(args[0], (list, tuple)) else [str(a) for a in args]
+            if "--scope" not in argv:
+                return subprocess.CompletedProcess(args=args[0], returncode=0)
+            argv_history.append(argv)
+            if "--expand-environment=no" in argv:
+                return subprocess.CompletedProcess(
+                    args=argv,
+                    returncode=1,
+                    stderr=b"Unknown option --expand-environment=no\n",
+                )
+            return subprocess.CompletedProcess(args=argv, returncode=0)
+
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/systemd-run")
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        assert pr._systemd_run_user_scope_available() is True
+        assert len(argv_history) == 2, argv_history
+        assert "--expand-environment=no" in argv_history[0]
+        assert "--expand-environment=no" not in argv_history[1]
+        assert pr._SYSTEMD_EXPAND_ENV_UNSUPPORTED is True
+        # The verdict is remembered: later spawns do not pay the rejected probe again.
+        assert "--expand-environment=no" not in pr._systemd_scope_argv(
+            "/usr/bin/systemd-run", "hermes-worker-x", "/bin/bash", "-lic", "true"
+        )
+
+    @pytest.mark.platforms("linux")
+    def test_probe_does_not_retry_when_the_scope_itself_failed(self, monkeypatch):
+        """Only an option rejection earns a second probe. An unreachable user bus
+        fails identically with and without the flag, so the retry would only
+        double the probe cost on the hosts that are already degrading."""
+        import tools.process_registry as pr
+
+        monkeypatch.setattr(pr, "_SYSTEMD_SCOPE_AVAILABLE", None)
+        monkeypatch.setattr(pr, "_SYSTEMD_SCOPE_PROBED_AT", 0.0)
+        monkeypatch.setattr(pr, "_SYSTEMD_EXPAND_ENV_UNSUPPORTED", None)
+        probe_calls = []
+
+        def fake_run(args, **kwargs):
+            # subprocess.run is called both as run(argv) and run(binary, ...);
+            # normalize either shape to the argv list.
+            argv = list(args[0]) if len(args) == 1 and isinstance(args[0], (list, tuple)) else [str(a) for a in args]
+            if "--scope" in argv:
+                probe_calls.append(argv)
+            return subprocess.CompletedProcess(
+                args=args[0],
+                returncode=1,
+                stderr=b"Failed to connect to user bus.\n",
+            )
+
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/systemd-run")
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        assert pr._systemd_run_user_scope_available() is False
+        assert len(probe_calls) == 1, probe_calls
+        assert pr._SYSTEMD_EXPAND_ENV_UNSUPPORTED is None
+
 
 
 
