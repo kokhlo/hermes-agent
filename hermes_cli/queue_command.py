@@ -214,16 +214,21 @@ def apply_queue_command(
             return QueueCommandResult(
                 say("cli.queue.usage_edit", "Usage: /queue edit <number> <new prompt>"), error=True)
         index = command.index
-        before, after = mutate(
-            lambda items: (items.__setitem__(index - 1, with_text(items[index - 1], command.payload)) or items)
+        applied = []
+        before, _ = mutate(
+            lambda items: (applied.append(with_text(items[index - 1], command.payload))
+                           or items.__setitem__(index - 1, applied[0]) or items)
             if 1 <= index <= len(items) else items)
-        if before == after:
+        # Membership, not ``before == after``: an in-place edit rewrites the very item the
+        # snapshot holds, so the two lists compare equal even though the edit landed. The CLI's
+        # queue holds immutable strings and never sees this; an envelope does.
+        if not applied:
             return QueueCommandResult(
                 say("cli.queue.item_not_found", "Queue item {index} not found. Current size: {size}")
                 .format(index=index, size=len(before)))
         return QueueCommandResult(
             say("cli.queue.updated", "Updated queue item {index}: {preview}")
-            .format(index=index, preview=describe(after[index - 1])))
+            .format(index=index, preview=describe(applied[0])))
     if action == MOVE:
         source, destination = command.index, command.destination
         if source is None or destination is None:
@@ -235,8 +240,11 @@ def apply_queue_command(
                 items.insert(destination - 1, items.pop(source - 1))
             return items
 
+        # A no-op swap (source == destination) and an out-of-range move both leave the order
+        # untouched, so the order itself is what says whether the move landed. Reordering never
+        # rewrites an item, so comparing orders is exact here.
         before, after = mutate(_move)
-        if before == after and source != destination:
+        if [id(item) for item in before] == [id(item) for item in after] and source != destination:
             return QueueCommandResult(
                 say("cli.queue.move_out_of_range", "Queue move out of range. Current size: {size}")
                 .format(size=len(before)))

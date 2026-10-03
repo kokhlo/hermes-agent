@@ -111,6 +111,40 @@ def test_edit_replaces_the_addressed_prompt():
     assert _queue_texts(session) == ["first prompt", "replacement prompt"]
 
 
+def test_edit_reports_success_rather_than_not_found():
+    """An in-place edit must not read as a failed lookup.
+
+    The envelope is rewritten in place, so a surface that compared its before/after snapshots
+    would see them as equal and report "not found" for an edit that had already landed.
+    """
+    session = _filled(_session(), "first prompt", "second prompt")
+    output = _result(server._cmd_queue("r", {}, session, "queue", "edit 1 replacement"))["output"]
+    assert "not found" not in output.lower(), output
+    assert "replacement" in output
+    assert _queue_texts(session) == ["replacement", "second prompt"]
+
+
+def test_edit_of_an_out_of_range_index_reports_not_found():
+    session = _filled(_session(), "first prompt")
+    output = _result(server._cmd_queue("r", {}, session, "queue", "edit 9 nope"))["output"]
+    assert "not found" in output.lower()
+    assert _queue_texts(session) == ["first prompt"]
+
+
+def test_editing_the_only_entry_keeps_the_head_in_place():
+    session = _filled(_session(), "only item")
+    _result(server._cmd_queue("r", {}, session, "queue", "edit 1 changed"))
+    assert _queue_texts(session) == ["changed"]
+    assert session["queued_prompt"]["transport"] == "ws-1", "the envelope lost its transport"
+
+
+def test_edit_preserves_the_envelopes_attachments():
+    session = _filled(_session(), "first prompt")
+    session["queued_prompt"]["image_paths"] = ["/tmp/a.png"]
+    _result(server._cmd_queue("r", {}, session, "queue", "edit 1 changed"))
+    assert session["queued_prompt"]["image_paths"] == ["/tmp/a.png"]
+
+
 def test_move_reorders_without_losing_an_entry():
     session = _filled(_session(), "first prompt", "second prompt", "third prompt")
     _result(server._cmd_queue("r", {}, session, "queue", "move 3 1"))
