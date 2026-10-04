@@ -83,6 +83,69 @@ def provider_owns_route(provider: Any, base_url: Any, config: Any = None) -> Opt
     return normalize_provider(inferred) == canonical
 
 
+def _same_config_route(provider: str, model_cfg: Any) -> bool:
+    """Whether the ``model:`` block's own ``base_url`` is the endpoint configured for ``provider``."""
+    if not isinstance(model_cfg, dict):
+        return False
+    configured = str(model_cfg.get("provider") or "").strip().lower()
+    if not configured:
+        # An unnamed block still owns a bare endpoint: it is what the runtime resolves with.
+        return True
+    target = provider.strip().lower()
+    if configured in ("custom", "local"):
+        return target in ("custom", "local")
+    if target == configured:
+        return True
+    from hermes_cli.providers import normalize_provider
+    return normalize_provider(target) == normalize_provider(configured)
+
+
+def configured_endpoint_for(provider: Any, config: Any = None) -> str:
+    """The endpoint ``config.yaml`` routes ``provider`` to, or ``""`` when config names none.
+
+    Only config-owned endpoints count: the ``model:`` block's own ``base_url`` when it is
+    ``provider``'s (a bare ``model.base_url`` IS that block's endpoint —
+    :func:`provider_owns_route` treats bare ``custom``/``local`` that way), then the
+    ``providers:``/``custom_providers:`` entry serving the name. A built-in provider's registry
+    endpoint is deliberately NOT consulted: nothing in config was corrected when it changes, and a
+    session pinned to a proxy or a self-hosted front-end for a registered provider is a deliberate
+    route, not a snapshot of a setting that moved. Offline throughout.
+    """
+    from hermes_cli.providers import resolve_custom_provider, resolve_user_provider
+    from hermes_cli.runtime_provider import get_compatible_custom_providers
+
+    raw = str(provider or "").strip()
+    if not raw:
+        return ""
+    cfg = config if isinstance(config, dict) else {}
+    model_cfg = cfg.get("model")
+    if _same_config_route(raw, model_cfg) and isinstance(model_cfg, dict):
+        configured = str(model_cfg.get("base_url") or "").strip()
+        if configured:
+            return configured
+    user_pdef = resolve_user_provider(raw, cfg.get("providers") or {}) or resolve_custom_provider(
+        raw, get_compatible_custom_providers(cfg))
+    return str(user_pdef.base_url or "").strip() if user_pdef is not None else ""
+
+
+def stale_persisted_endpoint(provider: Any, base_url: Any, config: Any = None) -> bool:
+    """True when a session's persisted endpoint contradicts the route config defines for it.
+
+    A stored route is a record of what the session last ran, not an instruction: a provider whose
+    configured endpoint moved (``model.base_url`` re-pointed, a ``providers:`` entry re-aimed) must
+    not keep sending traffic to the address the row remembers, across gateway restarts included —
+    nothing about a restart re-reads config for an already-persisted row. Only an endpoint config
+    names today can contradict the row; a provider with no configured endpoint keeps its snapshot,
+    since nothing claims that URL and a deliberate one-off route is indistinguishable from a stale
+    one by inspection alone.
+    """
+    stored = normalize_route_base_url(base_url)
+    if not stored:
+        return False
+    configured = normalize_route_base_url(configured_endpoint_for(provider, config))
+    return bool(configured) and configured != stored
+
+
 def drop_stale_model_route(model_cfg: Any, provider: Any, config: Any = None) -> "tuple[dict[str, Any], bool]":
     """Pop the route keys (``base_url``, ``api_mode``) a previous provider left in ``model:``
     when the block is re-pointed at *provider* without a fresh route (``hermes config set

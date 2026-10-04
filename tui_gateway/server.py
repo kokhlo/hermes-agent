@@ -1673,9 +1673,18 @@ def _stored_session_runtime_overrides(row: dict | None) -> dict:
     provider, base_url, api_mode = (str(route.get(k) or "").strip() for k in ("provider", "base_url", "api_mode"))
     service_tier = str(model_config.get("service_tier") or "").strip()
     reasoning_config = model_config.get("reasoning_config")
+    from hermes_cli.route_identity import stale_persisted_endpoint
     from hermes_cli.runtime_provider import is_foreign_provider_endpoint
     if is_foreign_provider_endpoint(provider, base_url):
         # The endpoint and its wire belong to the provider this chat left; resolve the stored one's own.
+        base_url = api_mode = ""
+    if base_url and stale_persisted_endpoint(provider, base_url):
+        # Same rule the healed branch below already applies, for the case where the identity is
+        # still routable: the row's endpoint is a record of the address this chat last ran, so a
+        # provider whose configured endpoint has since moved must resolve its own current route
+        # rather than keep dialling the retired one — a URL no config read or gateway restart touches.
+        logger.info("dropping persisted endpoint %r for provider %r: config now routes it elsewhere",
+                    base_url, provider)
         base_url = api_mode = ""
     # Heal a stale provider persisted by an older build (renamed/removed custom provider → "Unknown provider"):
     # recover ``custom:<name>`` from the stored base_url, then from the entry serving the model; else drop it.

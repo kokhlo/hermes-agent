@@ -62,9 +62,18 @@ def stored_session_route(session_meta, *, current_model, current_provider):
     if stored_model == current_model and not provider_changed:
         return None
     api_mode = runtime.get("api_mode") or None
+    from hermes_cli.route_identity import stale_persisted_endpoint
     from hermes_cli.runtime_provider import is_foreign_provider_endpoint
     if is_foreign_provider_endpoint(provider, base_url):
         # The endpoint and its wire belong to the provider this chat left; resolve the stored one's own.
+        base_url = api_mode = None
+    if base_url and stale_persisted_endpoint(provider, base_url):
+        # The row records the endpoint this chat last ran, not an instruction to keep running it:
+        # config has since moved this provider elsewhere, so the stored URL is a dead address that
+        # outlives every gateway restart. Let the configured route resolve the endpoint and its wire.
+        from cli import logger
+        logger.info("dropping persisted endpoint %r for provider %r: config now routes it elsewhere",
+                    base_url, provider)
         base_url = api_mode = None
     # A row's api_mode/base_url were written for whichever model the session last ran. Providers that
     # pick the wire per model (OpenCode Zen/Go, Copilot, Nous) re-derive both from the stored model, or a
