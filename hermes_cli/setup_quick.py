@@ -208,14 +208,15 @@ def _set_bundled_skills_opt_out(opt_out: bool, log_label: str, on_success=None, 
     ``on_success(sync_result)`` / ``on_error(exc)`` report the outcome."""
     try:
         from tools.skills_sync import sync_skills
-        from tools.skills_sync_bundled_ops import remove_pristine_bundled_skills, set_bundled_skills_opt_out
+        from tools.skills_sync_bundled_ops import (
+            remove_pristine_bundled_skills,
+            set_bundled_skills_opt_out,
+        )
         set_bundled_skills_opt_out(opt_out)
         if opt_out:
-            # The installer seeds the whole catalog before this wizard runs, and the marker only
-            # narrows what a *future* sync seeds — on its own it leaves that copy on disk. Drop the
-            # pristine ones here; the sync below re-seeds the essential skills the marker keeps.
-            # Same safety rule as `hermes skills opt-out --remove`: anything the user edited, or
-            # that isn't bundled, is left alone (#132883).
+            # The installer seeds the catalog before this wizard runs, and the marker only narrows
+            # what a *future* sync seeds — without this the seeded copy just sits there. Same rule
+            # as `hermes skills opt-out --remove`: user-edited and local skills survive (#132883).
             remove_pristine_bundled_skills(dry_run=False)
         result = sync_skills(quiet=True)
         if on_success is not None:
