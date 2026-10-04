@@ -19,8 +19,10 @@ import os
 import shutil
 import sys
 import tempfile
+import concurrent.futures
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -316,6 +318,118 @@ class TestProtectedDirsNeverRmtreed:
         assert new_att.exists(), "kanban files a call created are never tracked or deleted"
         assert not scratch.exists(), "root-level scratch files are still cleaned up (control)"
         assert dg.load_tracked() == []
+
+
+def _advisory_locking_available() -> bool:
+    """Whether THIS platform can lock at all. Deliberately checks the stdlib rather than
+    the module under test: a skip guard reading a symbol the fix introduces would make
+    the test skip (instead of fail) on pre-fix code, and a RED that never reaches its
+    assertion proves nothing."""
+    try:
+        import fcntl  # noqa: F401
+        return True
+    except ImportError:
+        pass
+    try:
+        import msvcrt  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+class TestConcurrentRegistryWrites:
+    """Regression tests for #132943 — ``post_tool_call`` fires on concurrent tool
+    workers, so the tracked.json read-modify-write must be serialised and each write
+    must own a private temp file. Pre-fix, concurrent ``track()`` calls silently lost
+    each other's entries (nothing raised, nothing logged) and concurrent saves shared
+    one ``tracked.json.tmp`` path."""
+
+    def test_parallel_track_keeps_every_entry(self, _isolate_env):
+        """Concurrent track() calls must not lose each other's entries. Pre-fix, 64
+        threads tracking 64 distinct files left ZERO entries in the registry."""
+        dg = _load_lib()
+        if not _advisory_locking_available():
+            pytest.skip("no advisory locking available on this platform")
+
+        scratch = _isolate_env / "hermes-test"
+        scratch.mkdir()
+        targets = []
+        for i in range(64):
+            f = scratch / f"frag_{i}.txt"
+            f.write_text("x")
+            targets.append(f)
+
+        # No barrier: a Barrier deadlocks the whole file when any worker raises (a party
+        # never arrives and wait() blocks with no timeout). The plain concurrent run
+        # already reproduces the lost update.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
+            list(ex.map(lambda f: dg.track(str(f), "test", silent=True), targets))
+
+        entries = dg.load_tracked()
+        assert len(entries) == len(targets), (
+            f"{len(targets) - len(entries)} tracked entries were silently dropped by "
+            f"concurrent writers"
+        )
+        assert {e["path"] for e in entries} == {str(f) for f in targets}
+
+    def test_parallel_save_uses_a_unique_temp_path_per_write(self, _isolate_env):
+        """Each write must land through its own temp file — two writers sharing one
+        path is what let a concurrent reader observe a half-written registry."""
+        dg = _load_lib()
+        seen = []
+        real_mkstemp = tempfile.mkstemp
+
+        def recording_mkstemp(*args, **kwargs):
+            fd, name = real_mkstemp(*args, **kwargs)
+            seen.append(name)
+            return fd, name
+
+        payloads = [[{"path": f"/tmp/hermes-x/{i}", "category": "test",
+                      "timestamp": datetime.now(timezone.utc).isoformat(), "size": i}]
+                    for i in range(8)]
+
+        with mock.patch.object(tempfile, "mkstemp", recording_mkstemp):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+                list(ex.map(dg.save_tracked, payloads))
+
+        assert len(seen) == 8, "each save must create exactly one temp file"
+        assert len(set(seen)) == 8, f"concurrent saves shared temp paths: {seen}"
+        assert not any(Path(name).exists() for name in seen), "temp files must not survive the rename"
+
+    def test_lock_is_reentrant_across_nesting(self, _isolate_env):
+        """A nested acquire on the same thread must not deadlock: flock conflicts
+        across separate descriptors even inside one process, so a second open
+        inside an already-held critical section would hang forever."""
+        dg = _load_lib()
+        if not _advisory_locking_available():
+            pytest.skip("no advisory locking available on this platform")
+
+        with dg.tracked_state_lock():
+            # Same thread, already holding — must return, not block.
+            with dg.tracked_state_lock():
+                dg.save_tracked([{"path": "/tmp/hermes-x/nested", "category": "test",
+                                  "timestamp": datetime.now(timezone.utc).isoformat(), "size": 1}])
+            # Still inside the OUTER hold: a competing writer must not be able in.
+            assert dg._lock_depth.depth == 1
+        assert dg._lock_depth.depth == 0, "the outermost holder must clear the nesting depth"
+
+        # With the depth back at zero a fresh acquire still works.
+        with dg.tracked_state_lock():
+            dg.save_tracked(dg.load_tracked())
+        assert dg.load_tracked()[0]["path"] == "/tmp/hermes-x/nested"
+
+    def test_save_without_locking_still_writes_atomically(self, _isolate_env, monkeypatch):
+        """With no advisory locking available the lock degrades to a logged no-op —
+        the unique temp file must still guarantee a readable registry."""
+        dg = _load_lib()
+        monkeypatch.setattr(dg, "fcntl", None)
+        monkeypatch.setattr(dg, "msvcrt", None)
+        with dg.tracked_state_lock():
+            dg.save_tracked([{"path": "/tmp/hermes-x/a", "category": "test",
+                              "timestamp": datetime.now(timezone.utc).isoformat(), "size": 1}])
+
+        assert dg.load_tracked()[0]["path"] == "/tmp/hermes-x/a"
+        assert "no advisory locking" in (_isolate_env / "disk-cleanup" / "cleanup.log").read_text()
 
 
 class TestGitWorktreeFilesNeverCleaned:

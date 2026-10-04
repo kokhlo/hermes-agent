@@ -12,7 +12,10 @@ import contextlib
 import functools
 import json
 import logging
+import os
 import shutil
+import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -21,7 +24,23 @@ from hermes_constants import get_hermes_home
 
 logger = logging.getLogger(__name__)
 
+# fcntl is POSIX-only; Windows locks through msvcrt. Neither importable means no
+# advisory locking at all — the registry still gets unique temp files.
+fcntl = None
+msvcrt = None
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - platform dependent
+    try:
+        import msvcrt  # noqa: F401
+    except ImportError:
+        pass
+
 _LARGE_FILE_BYTES = 500 * 1024 * 1024
+
+# Per-thread nesting depth for ``tracked_state_lock``; the lock is not re-entrant
+# at the file-descriptor level, so the counter is what makes nested use safe.
+_lock_depth = threading.local()
 
 
 def _state_file(name: str) -> Path:
@@ -67,7 +86,12 @@ def _log(message: str) -> None:
 
 
 def load_tracked() -> List[Dict[str, Any]]:
-    """Load tracked.json.  Restores from ``.bak`` on corruption."""
+    """Load tracked.json.  Restores from ``.bak`` on corruption.
+
+    Safe without the state lock: every writer lands through an atomic replace of
+    a fully-written private temp file, so a reader sees either the old or the new
+    registry, never a partial one.
+    """
     tf = _state_file("tracked.json")
     tf.parent.mkdir(parents=True, exist_ok=True)
     if not tf.exists():
@@ -88,15 +112,81 @@ def load_tracked() -> List[Dict[str, Any]]:
         return []
 
 
+@contextlib.contextmanager
+def tracked_state_lock() -> Iterator[None]:
+    """Exclusive advisory lock over a read-modify-write of tracked.json.
+
+    ``post_tool_call`` fires on concurrent tool workers, so two writers could
+    otherwise both load the registry, append their own entry and save — the later
+    save silently dropping the earlier entry, which means the file is never
+    cleaned up. The lock lives on its own file so tracked.json itself can still
+    be atomically replaced while it is held.
+
+    Callers must hold this across load AND save. Loading outside the lock is the
+    bug, not the alternative.
+
+    Re-entrant per thread: a second fd would deadlock against the first even
+    inside one process, so nested acquisition on the same thread is counted and
+    the innermost holder releases.
+    """
+    held = getattr(_lock_depth, "depth", 0)
+    if held:  # already ours on this thread — do not re-open, or flock would self-deadlock
+        _lock_depth.depth = held + 1
+        try:
+            yield
+        finally:
+            _lock_depth.depth -= 1
+        return
+
+    posix_lock, win_lock = fcntl, msvcrt
+    if posix_lock is None and win_lock is None:  # no locking: still atomic, just not serialised
+        _log("WARN: no advisory locking available — tracked.json writes are atomic but unsynchronised")
+        yield
+        return
+
+    def _set(held_: bool) -> None:
+        if posix_lock is not None:
+            posix_lock.flock(fd, posix_lock.LOCK_UN if held_ else posix_lock.LOCK_EX)
+        elif win_lock is not None:
+            os.lseek(fd, 0, os.SEEK_SET)
+            win_lock.locking(fd, win_lock.LK_UNLCK if held_ else win_lock.LK_LOCK, 1)
+
+    lock_path = _state_file("tracked.json.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(lock_path, flags, 0o600)
+    _lock_depth.depth = 1
+    try:
+        _set(False)
+        yield
+    finally:
+        _lock_depth.depth = 0
+        with contextlib.suppress(OSError):
+            _set(True)
+        os.close(fd)
+
+
 def save_tracked(tracked: List[Dict[str, Any]]) -> None:
-    """Atomic write: ``.tmp`` → backup old → rename."""
+    """Atomic write: private temp file → backup old → rename.
+
+    Each write owns a unique temp path, so concurrent writers can never interleave
+    on the same file or rename each other's half-finished content away.
+    """
     tf = _state_file("tracked.json")
     tf.parent.mkdir(parents=True, exist_ok=True)
-    tmp = tf.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(tracked, indent=2), encoding="utf-8")
-    if tf.exists():
-        shutil.copy2(tf, tf.with_suffix(".json.bak"))
-    tmp.replace(tf)
+    fd, tmp_name = tempfile.mkstemp(dir=tf.parent, prefix="tracked.", suffix=".json.tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(tracked, indent=2))
+        if tf.exists():
+            shutil.copy2(tf, tf.with_suffix(".json.bak"))
+        tmp.replace(tf)
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink()  # already renamed away on success; cleans up a failed write
 
 
 ALLOWED_CATEGORIES = {
@@ -186,12 +276,13 @@ def track(path_str: str, category: str, silent: bool = False) -> bool:
         _log(f"REJECT: {path} (outside HERMES_HOME)")
         return False
     size = path.stat().st_size if path.is_file() else 0
-    tracked = load_tracked()
-    if any(item["path"] == str(path) for item in tracked):
-        return False
-    tracked.append({"path": str(path), "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "category": category, "size": size})
-    save_tracked(tracked)
+    with tracked_state_lock():
+        tracked = load_tracked()
+        if any(item["path"] == str(path) for item in tracked):
+            return False
+        tracked.append({"path": str(path), "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "category": category, "size": size})
+        save_tracked(tracked)
     _log(f"TRACKED: {path} ({category}, {fmt_size(size)})")
     if not silent:
         print(f"Tracked: {path} ({category}, {fmt_size(size)})")
@@ -201,11 +292,13 @@ def track(path_str: str, category: str, silent: bool = False) -> bool:
 def forget(path_str: str) -> int:
     """Remove a path from tracking without deleting the file."""
     p = Path(path_str).resolve()
-    tracked = load_tracked()
-    kept = [i for i in tracked if Path(i["path"]).resolve() != p]
-    removed = len(tracked) - len(kept)
+    with tracked_state_lock():
+        tracked = load_tracked()
+        kept = [i for i in tracked if Path(i["path"]).resolve() != p]
+        removed = len(tracked) - len(kept)
+        if removed:
+            save_tracked(kept)
     if removed:
-        save_tracked(kept)
         _log(f"FORGOT: {p} ({removed} entries)")
     return removed
 
@@ -274,31 +367,36 @@ def quick() -> Dict[str, Any]:
     deleted = freed = 0
     new_tracked: List[Dict] = []
     errors: List[str] = []
-    for item, p, age in _live_items(load_tracked(), datetime.now(timezone.utc), log_stale=True):
-        cat = item["category"]
-        if cat in _STALE_SKIP_NOTE and (re_cat := guess_category(p)) != cat:
-            # Misclassified stale entry — drop it rather than delete the file.
-            _log(f"SKIP stale {cat} entry: {p} (re-classified as {re_cat!r}{_STALE_SKIP_NOTE[cat]})")
-            continue
-        # Hard safety net even if re-validation above somehow let it through.
-        if _is_protected_cron_path(p):
-            _log(f"SKIP protected cron path: {p}")
-            continue
-        if _is_protected_dir(p):
-            _log(f"SKIPPED: {p} (protected top-level dir)")
-            continue
-        if not _is_auto_delete(cat, age):
-            new_tracked.append(item)
-            continue
-        err = _delete_item(item)
-        if err is None:
-            freed += item["size"]
-            deleted += 1
-        else:
-            errors.append(err)
-            new_tracked.append(item)
+    # The whole scan is held under the lock: it reads the registry, deletes files
+    # and rewrites it, so releasing mid-way would let a concurrent track() append
+    # an entry that this save then drops. The empty-dir sweep touches no registry
+    # state and stays outside so it cannot block tool workers.
+    with tracked_state_lock():
+        for item, p, age in _live_items(load_tracked(), datetime.now(timezone.utc), log_stale=True):
+            cat = item["category"]
+            if cat in _STALE_SKIP_NOTE and (re_cat := guess_category(p)) != cat:
+                # Misclassified stale entry — drop it rather than delete the file.
+                _log(f"SKIP stale {cat} entry: {p} (re-classified as {re_cat!r}{_STALE_SKIP_NOTE[cat]})")
+                continue
+            # Hard safety net even if re-validation above somehow let it through.
+            if _is_protected_cron_path(p):
+                _log(f"SKIP protected cron path: {p}")
+                continue
+            if _is_protected_dir(p):
+                _log(f"SKIPPED: {p} (protected top-level dir)")
+                continue
+            if not _is_auto_delete(cat, age):
+                new_tracked.append(item)
+                continue
+            err = _delete_item(item)
+            if err is None:
+                freed += item["size"]
+                deleted += 1
+            else:
+                errors.append(err)
+                new_tracked.append(item)
+        save_tracked(new_tracked)
     empty_removed = _sweep_empty_dirs(get_hermes_home())
-    save_tracked(new_tracked)
     _log(f"QUICK_SUMMARY: {deleted} files, {empty_removed} dirs, {fmt_size(freed)}")
     return {"deleted": deleted, "empty_dirs": empty_removed, "freed": freed, "errors": errors}
 
