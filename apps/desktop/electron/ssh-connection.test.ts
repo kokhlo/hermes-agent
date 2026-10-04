@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 
-import { test, vi } from 'vitest'
+import { afterEach, test, vi } from 'vitest'
 
 import {
   baseSshOptions,
@@ -19,10 +19,13 @@ import {
   CONTROL_PERSIST_SECONDS,
   controlSocketPath,
   createSshProbeConnection,
+  DEFAULT_CONNECT_TIMEOUT_MS,
+  DEFAULT_FORWARD_TIMEOUT_MS,
   forwardSpec,
   hostArgs,
   redactSecrets,
   REMOTE_PROBE_TIMEOUT_SECS,
+  resolveSshTimeoutMs,
   runSsh,
   SSH_ERROR,
   SshConnection,
@@ -34,6 +37,10 @@ import {
 import { createControlMasterHolders } from './ssh-control-master-holders'
 
 const execFileAsync = promisify(execFile)
+
+afterEach(() => {
+  vi.unstubAllEnvs()
+})
 
 test('redactSecrets scrubs the spawn-time session token env var', () => {
   const line = 'setsid env HERMES_DASHBOARD_SESSION_TOKEN=abc123deadbeef HERMES_DESKTOP=1 hermes dashboard'
@@ -1624,4 +1631,79 @@ test('#103288: every spawn uses the injected sshBinary; the default stays bare s
   const plain = createSshProbeConnection({ host: 'box', user: 'me' }, { spawnFn })
   await plain.open()
   assert.deepEqual([...new Set(commands)], ['ssh'])
+})
+
+test('resolveSshTimeoutMs: an unset or empty variable keeps the built-in default', () => {
+  assert.equal(resolveSshTimeoutMs('HERMES_X', 15_000, {}), 15_000)
+  assert.equal(resolveSshTimeoutMs('HERMES_X', 15_000, { HERMES_X: '' }), 15_000)
+})
+
+test('resolveSshTimeoutMs: a value that is not a positive integer keeps the default', () => {
+  for (const raw of ['abc', '15s', '-1', '0', 'NaN', ' ']) {
+    assert.equal(
+      resolveSshTimeoutMs('HERMES_X', 15_000, { HERMES_X: raw }),
+      15_000,
+      `${JSON.stringify(raw)} must not become a budget`
+    )
+  }
+})
+
+test('resolveSshTimeoutMs: a raised budget is honoured so a slow link is not cut at 15 s', () => {
+  assert.equal(resolveSshTimeoutMs('HERMES_X', 15_000, { HERMES_X: '45000' }), 45_000)
+  assert.equal(resolveSshTimeoutMs('HERMES_X', 15_000, { HERMES_X: '2000' }), 2000)
+})
+
+test('resolveSshTimeoutMs: an absurd value is clamped so a typo cannot hang boot', () => {
+  assert.equal(resolveSshTimeoutMs('HERMES_X', 15_000, { HERMES_X: '99999999' }), 120_000)
+  assert.equal(resolveSshTimeoutMs('HERMES_X', 15_000, { HERMES_X: '120000' }), 120_000)
+})
+
+test('#132508: with nothing set, both SSH budgets stay at their built-in defaults', () => {
+  const conn = new SshConnection({ host: 'box', user: 'me' }, {})
+  assert.equal(conn._connectTimeoutMs, DEFAULT_CONNECT_TIMEOUT_MS)
+  assert.equal(conn._forwardTimeoutMs, DEFAULT_FORWARD_TIMEOUT_MS)
+})
+
+test('#132508: a raised env budget reaches the connection and the ConnectTimeout ssh is given', () => {
+  vi.stubEnv('HERMES_SSH_CONNECT_TIMEOUT_MS', '45000')
+  vi.stubEnv('HERMES_SSH_FORWARD_TIMEOUT_MS', '30000')
+
+  const conn = new SshConnection({ host: 'box', user: 'me' }, {})
+  assert.equal(conn._connectTimeoutMs, 45_000)
+  assert.equal(conn._forwardTimeoutMs, 30_000)
+
+  // The user's own ssh config cannot raise this: the value goes on the command
+  // line, which beats ConnectTimeout in ~/.ssh/config.
+  assert.match(baseSshOptions('/tmp/x.sock').join(' '), /ConnectTimeout=45/)
+})
+
+test('#132508: a non-positive or unparsable env value falls back rather than disarming the guard', () => {
+  vi.stubEnv('HERMES_SSH_CONNECT_TIMEOUT_MS', '0')
+  vi.stubEnv('HERMES_SSH_FORWARD_TIMEOUT_MS', 'soon')
+
+  const conn = new SshConnection({ host: 'box', user: 'me' }, {})
+  assert.equal(conn._connectTimeoutMs, DEFAULT_CONNECT_TIMEOUT_MS)
+  assert.equal(conn._forwardTimeoutMs, DEFAULT_FORWARD_TIMEOUT_MS)
+})
+
+test('#132508: an explicit constructor option still wins over the environment', () => {
+  vi.stubEnv('HERMES_SSH_CONNECT_TIMEOUT_MS', '45000')
+  vi.stubEnv('HERMES_SSH_FORWARD_TIMEOUT_MS', '30000')
+
+  const conn = new SshConnection(
+    { host: 'box', user: 'me' },
+    { connectTimeoutMs: 1000, forwardTimeoutMs: 2000 }
+  )
+
+  assert.equal(conn._connectTimeoutMs, 1000)
+  assert.equal(conn._forwardTimeoutMs, 2000)
+  assert.match(baseSshOptions('/tmp/x.sock', conn._connectTimeoutMs).join(' '), /ConnectTimeout=1\b/)
+})
+
+test('#132508: a sub-second budget cannot become ConnectTimeout=0 on the command line', () => {
+  vi.stubEnv('HERMES_SSH_CONNECT_TIMEOUT_MS', '400')
+
+  const conn = new SshConnection({ host: 'box', user: 'me' }, {})
+  assert.equal(conn._connectTimeoutMs, 400)
+  assert.match(baseSshOptions('/tmp/x.sock', conn._connectTimeoutMs).join(' '), /ConnectTimeout=1\b/)
 })

@@ -43,6 +43,58 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 15_000
 const DEFAULT_EXEC_TIMEOUT_MS = 20_000
 const DEFAULT_FORWARD_TIMEOUT_MS = 15_000
 
+// Ceiling for an environment-supplied SSH budget. The point of the override is
+// to survive a genuinely slow or lossy link (in-flight Wi-Fi, a congested
+// hotspot, a phone hotspot), not to let a typo park a boot on a single
+// handshake for minutes.
+const MAX_SSH_TIMEOUT_MS = 120_000
+
+/**
+ * Resolve an SSH operation budget from the environment, falling back to the
+ * built-in default. An unset, empty or non-positive value keeps the default;
+ * anything above MAX_SSH_TIMEOUT_MS is clamped. Same contract as
+ * HERMES_PROBE_TIMEOUT_MS in backend-probes.ts, so there is one convention for
+ * "a Desktop timeout you can move" rather than two.
+ *
+ * Strictly digits, deliberately: `Number.parseInt('15s')` is 15, so a value
+ * with trailing junk would silently turn a 15 s budget into a 15 ms one and
+ * fail every operation instantly — worse than ignoring the setting at all.
+ */
+function resolveSshTimeoutMs(envVarName: string, fallbackMs: number, env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[envVarName]
+
+  if (raw == null || raw === '') {
+    return fallbackMs
+  }
+
+  const trimmed = String(raw).trim()
+
+  if (!/^\d+$/.test(trimmed)) {
+    return fallbackMs
+  }
+
+  const n = Number(trimmed)
+
+  if (!Number.isFinite(n) || n <= 0) {
+    return fallbackMs
+  }
+
+  return Math.min(n, MAX_SSH_TIMEOUT_MS)
+}
+
+// Read per construction rather than once at module load, so a caller (or a test)
+// that changes the environment gets the new budget without reloading the module.
+// The budget also goes onto the command line as `-o ConnectTimeout=<secs>`,
+// which beats the user's own ssh config — so without this, a slow link has no
+// override at all.
+function connectTimeoutMsFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+  return resolveSshTimeoutMs('HERMES_SSH_CONNECT_TIMEOUT_MS', DEFAULT_CONNECT_TIMEOUT_MS, env)
+}
+
+function forwardTimeoutMsFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+  return resolveSshTimeoutMs('HERMES_SSH_FORWARD_TIMEOUT_MS', DEFAULT_FORWARD_TIMEOUT_MS, env)
+}
+
 // Remote-side watchdog for probe commands, in seconds. runSsh SIGKILLs the
 // LOCAL ssh child on timeout, but the remote command keeps running as an
 // orphan (ppid=1) — a hung remote CLI (e.g. a wedged `hermes --version`)
@@ -236,7 +288,10 @@ function checkShortControlParent(): void {
 // connection. No-mux (Windows OpenSSH never implemented mux sockets): plain
 // per-invocation options — each ssh call authenticates on its own.
 function baseSshOptions(controlPath, connectTimeoutMs?) {
-  const connectSecs = Math.max(1, Math.round((connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS) / 1000))
+  const connectSecs = Math.max(
+    1,
+    Math.round((connectTimeoutMs ?? connectTimeoutMsFromEnv()) / 1000)
+  )
 
   const mux = controlPath
     ? [
@@ -725,9 +780,9 @@ class SshConnection {
     this.sshBinary = opts.sshBinary || 'ssh'
 
     this._log = typeof opts.rememberLog === 'function' ? opts.rememberLog : () => {}
-    this._connectTimeoutMs = opts.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS
+    this._connectTimeoutMs = opts.connectTimeoutMs ?? connectTimeoutMsFromEnv()
     this._execTimeoutMs = opts.execTimeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS
-    this._forwardTimeoutMs = opts.forwardTimeoutMs ?? DEFAULT_FORWARD_TIMEOUT_MS
+    this._forwardTimeoutMs = opts.forwardTimeoutMs ?? forwardTimeoutMsFromEnv()
     this._tunnelRestartLimit = opts.tunnelRestartLimit ?? DEFAULT_TUNNEL_RESTART_LIMIT
     this._tunnelRestartDelayMs = opts.tunnelRestartDelayMs ?? DEFAULT_TUNNEL_RESTART_DELAY_MS
     this._controlKeepaliveTimer = null
@@ -1394,6 +1449,7 @@ export {
   pickLocalPort,
   redactSecrets,
   REMOTE_PROBE_TIMEOUT_SECS,
+  resolveSshTimeoutMs,
   runSsh,
   SSH_ERROR,
   SshConnection,
