@@ -26,20 +26,13 @@ from gateway.session import SessionEntry, SessionSource
 from gateway.session_identity import RoutingIdentity
 
 
-def _make_source(
-    *,
-    platform: Platform = Platform.TELEGRAM,
-    user_id: str = "user1",
-    chat_type: str = "dm",
-    chat_id: str = "c1",
-    profile: str | None = None,
-) -> SessionSource:
+def _make_source(*, profile: str | None = None) -> SessionSource:
     return SessionSource(
-        platform=platform,
-        user_id=user_id,
-        chat_id=chat_id,
-        user_name=f"name-{user_id}",
-        chat_type=chat_type,
+        platform=Platform.TELEGRAM,
+        user_id="user1",
+        chat_id="c1",
+        user_name="name-user1",
+        chat_type="dm",
         profile=profile,
     )
 
@@ -60,21 +53,18 @@ def _make_event(text: str, source: SessionSource) -> MessageEvent:
     return MessageEvent(text=text, source=source, message_id="m1")
 
 
-def _make_runner(*, multiplex_profiles: bool = False, platform_extra: dict | None = None,
-                 platform: Platform = Platform.TELEGRAM, served_quick_commands: dict | None = None,
+def _make_runner(*, multiplex_profiles: bool = False, served_quick_commands: dict | None = None,
                  served_profile: str = "b"):
     from gateway.run import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
         multiplex_profiles=multiplex_profiles,
-        platforms={
-            platform: PlatformConfig(enabled=True, token="***", extra=platform_extra or {})
-        },
+        platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="***")},
     )
     adapter = MagicMock()
     adapter.send = AsyncMock()
-    runner.adapters = {platform: adapter}
+    runner.adapters = {Platform.TELEGRAM: adapter}
     runner._voice_mode = {}
     runner.hooks = SimpleNamespace(
         emit=AsyncMock(), emit_collect=AsyncMock(return_value=[]), loaded_hooks=False,
@@ -85,7 +75,7 @@ def _make_runner(*, multiplex_profiles: bool = False, platform_extra: dict | Non
         session_id="sess-1",
         created_at=datetime.now(),
         updated_at=datetime.now(),
-        platform=platform,
+        platform=Platform.TELEGRAM,
         chat_type="dm",
         total_tokens=0,
     )
