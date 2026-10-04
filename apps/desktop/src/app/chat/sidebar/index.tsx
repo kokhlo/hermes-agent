@@ -298,7 +298,13 @@ export function stripFtsMarkers(snippet: string): string {
 // sessions keep today's snippet fallback via sessionTitle().
 // Exported for tests.
 export function searchResultToSession(result: SessionSearchResult): SessionInfo {
-  const ts = result.session_started ?? Date.now() / 1000
+  const started = result.session_started ?? Date.now() / 1000
+  // A content hit knows WHEN THE MATCHED MESSAGE was written; an id hit only
+  // knows the conversation, and row recency (`last_active`) rides on the rich
+  // row the backend attaches. Prefer the message time so a hit inside a
+  // long-lived session renders the matched message's date instead of the
+  // conversation's — the gap that grows with the session's age.
+  const recency = result.timestamp ?? result.last_active ?? started
 
   return {
     archived: false,
@@ -308,13 +314,13 @@ export function searchResultToSession(result: SessionSearchResult): SessionInfo 
     _lineage_root_id: result.lineage_root ?? null,
     input_tokens: 0,
     is_active: false,
-    last_active: result.last_active ?? ts,
+    last_active: recency,
     message_count: 0,
     model: result.model ?? null,
     output_tokens: 0,
     preview: stripFtsMarkers(result.snippet ?? '').trim() || null,
     source: result.source ?? null,
-    started_at: ts,
+    started_at: started,
     title: result.title?.trim() || null,
     tool_call_count: 0
   }

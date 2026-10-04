@@ -1376,6 +1376,12 @@ export interface SessionSearchResult {
   session_started: number | null
   snippet: string
   source: string | null
+  /** Epoch seconds the MATCHED MESSAGE was written — content hits only, absent
+   *  on id-match rows (a pasted id matches the conversation, not a message).
+   *  The sidebar renders this in preference to the conversation's own recency:
+   *  a hit on a session that has been open for days should read as the date of
+   *  the message that matched, not the date the conversation was created. */
+  timestamp?: number | null
   /** Real session title from the sessions table; the backend enriches every
    *  search hit with it (web_routers/sessions.py add_lineage_result), absent
    *  for untitled sessions. The sidebar maps it onto the synthesized row so

@@ -467,6 +467,7 @@ function MessageList({
 
 function SessionRow({
   session,
+  matchedAt,
   snippet,
   searchQuery,
   isExpanded,
@@ -723,7 +724,7 @@ function SessionRow({
                   </>
                 )}
                 <span className="text-border">&#183;</span>
-                <span className="shrink-0">{timeAgo(session.last_active)}</span>
+                <span className="shrink-0">{timeAgo(matchedAt ?? session.last_active)}</span>
               </div>
               {snippet && <SnippetHighlight snippet={snippet} />}
             </div>
@@ -1556,10 +1557,16 @@ export default function SessionsPage() {
 
   // Build snippet map from search results (session_id → snippet)
   const snippetMap = new Map<string, string>();
+  // ...and the matched message's own time, for the same two keys. A search row
+  // is a MESSAGE that matched, so it reads with the message's date; a listed
+  // row keeps the conversation's recency (no entry here).
+  const matchedAtMap = new Map<string, number | null>();
   if (searchResults) {
     for (const r of searchResults) {
       snippetMap.set(r.session_id, r.snippet);
       snippetMap.set(r.id, r.snippet);
+      matchedAtMap.set(r.session_id, r.timestamp ?? null);
+      matchedAtMap.set(r.id, r.timestamp ?? null);
     }
   }
 
@@ -2113,6 +2120,7 @@ export default function SessionsPage() {
                 <SessionRow
                   key={s.id}
                   session={s}
+                  matchedAt={matchedAtMap.get(s.id)}
                   snippet={snippetMap.get(s.id)}
                   searchQuery={search || undefined}
                   isExpanded={expandedId === s.id}
@@ -2216,6 +2224,9 @@ export default function SessionsPage() {
 interface SessionRowProps {
   isExpanded: boolean;
   isSelected: boolean;
+  /** Epoch seconds of the MATCHED MESSAGE for a search row; undefined for a
+   *  listed row, which keeps the conversation's own recency. */
+  matchedAt?: number | null;
   onDelete: () => void;
   onExport: (id: string) => void;
   onRename: (id: string, title: string, profile?: string) => Promise<void>;

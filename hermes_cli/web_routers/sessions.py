@@ -392,14 +392,23 @@ async def search_sessions(
                     payload["id"] = sid
                 seen[root] = payload
 
-            def hit_payload(row: dict, snippet: str, role, session_started) -> dict:
+            def hit_payload(row: dict, snippet: str, role, session_started,
+                            matched_at=None) -> dict:
                 # `last_active` rides only on id-match rows (sessions table); FTS
                 # hits have no row recency and leave it null so the desktop can
                 # fall back to session_started instead of inventing one.
+                #
+                # `timestamp` is the matched MESSAGE's own time (epoch seconds,
+                # same unit as session_started), carried only by content hits:
+                # without it a hit on a long-lived session renders the
+                # conversation's creation date. It is a separate argument rather
+                # than a row lookup so a sessions-table row can never be mistaken
+                # for a message timestamp.
                 return {
                     "snippet": snippet, "role": role, "source": row.get("source"),
                     "model": row.get("model"), "session_started": session_started,
-                    "last_active": row.get("last_active")}
+                    "last_active": row.get("last_active"),
+                    "timestamp": matched_at}
 
             # Direct ID matches first (pasted ids never appear in message text).
             for row in db.search_sessions_by_id(
@@ -420,13 +429,15 @@ async def search_sessions(
             matches = db.search_messages(
                 query=prefix_query, source_filter=include_sources,
                 exclude_sources=exclude_list or None, limit=max(safe_limit * 5, 50),
-                fields=("session_id", "role", "snippet", "source", "model", "session_started"))
+                fields=("session_id", "role", "snippet", "source", "model",
+                        "session_started", "timestamp"))
             for m in matches:
                 if len(seen) >= safe_limit:
                     break
                 add_lineage_result(
                     m["session_id"],
-                    hit_payload(m, m.get("snippet", ""), m.get("role"), m.get("session_started")))
+                    hit_payload(m, m.get("snippet", ""), m.get("role"),
+                                m.get("session_started"), m.get("timestamp")))
             return {"results": list(seen.values())}
 
         # FTS over a large state.db is the slowest read here; keep it off the loop (#60747).

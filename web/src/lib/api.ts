@@ -2568,6 +2568,11 @@ export interface SessionSearchResult extends SessionInfo {
   snippet: string;
   role: string | null;
   session_started: number | null;
+  /** Epoch seconds the MATCHED MESSAGE was written — content hits only, absent
+   *  on id-match rows. Preferred over the conversation's recency when stamping
+   *  a search row: a hit on a session open for days should read as the date of
+   *  the message that matched. */
+  timestamp?: number | null;
   lineage_root?: string;
 }
 

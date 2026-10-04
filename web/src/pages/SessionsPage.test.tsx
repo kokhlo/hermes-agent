@@ -184,4 +184,53 @@ describe("SessionsPage per-row profile routing (#99387)", () => {
 
     expect(apiMocks.deleteSession).toHaveBeenCalledWith("sid-worker", "worker");
   });
+
+  // A search hit is a MESSAGE that matched; the row must read with that
+  // message's date, not the conversation's creation date (days earlier on a
+  // long-lived session).
+  it("stamps a search row with the matched message's time, not the session start", async () => {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const sessionStart = nowSeconds - 40 * 24 * 3600;
+    const matchedAt = nowSeconds - 2 * 3600;
+    apiMocks.searchSessions.mockResolvedValue({
+      results: [
+        { id: "sid-aged", session_id: "sid-aged", profile: "worker", source: "cli", model: null,
+          title: "Long-lived conversation", started_at: sessionStart, ended_at: null,
+          last_active: sessionStart, is_active: false, message_count: 2, tool_call_count: 0,
+          input_tokens: 1, output_tokens: 1, preview: "found", snippet: "found", role: "user",
+          session_started: sessionStart, timestamp: matchedAt },
+      ],
+    });
+    await renderSessionsPage([
+      { id: "sid-default", profile: "default", source: "cli", model: null, title: "Listed", started_at: 1,
+        ended_at: null, last_active: 1, is_active: false, message_count: 2, tool_call_count: 0,
+        input_tokens: 1, output_tokens: 1, preview: "listed" },
+    ]);
+
+    const search = document.querySelector<HTMLInputElement>('input[placeholder]');
+    if (!search) throw new Error("search input not rendered");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(search, "found");
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await waitFor(() => document.body.textContent?.includes("Long-lived conversation") === true);
+
+    // 2h ago (the matched message) — not "40d ago" (the conversation's start).
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("2h ago");
+    expect(text).not.toContain("40d ago");
+  });
+
+  it("keeps the conversation recency for a listed (non-search) row", async () => {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    await renderSessionsPage([
+      { id: "sid-listed", profile: "default", source: "cli", model: null, title: "Listed row",
+        started_at: nowSeconds - 3 * 3600, ended_at: null, last_active: nowSeconds - 3 * 3600,
+        is_active: false, message_count: 2, tool_call_count: 0, input_tokens: 1, output_tokens: 1,
+        preview: "listed" },
+    ]);
+
+    await waitFor(() => document.body.textContent?.includes("Listed row") === true);
+    expect(document.body.textContent ?? "").toContain("3h ago");
+  });
 });

@@ -78,6 +78,7 @@ class _FakeSessionDB:
                 "source": "cli",
                 "model": "claude",
                 "session_started": 100,
+                "timestamp": 140,
             },
             {
                 "session_id": "content_session",
@@ -86,6 +87,7 @@ class _FakeSessionDB:
                 "source": "desktop",
                 "model": "gpt",
                 "session_started": 200,
+                "timestamp": 260,
             },
         ]
         return [
@@ -116,6 +118,9 @@ def test_desktop_session_search_merges_id_matches_before_content_matches(monkeyp
 
     assert _FakeSessionDB.requested_fields is not None
     assert "context" not in _FakeSessionDB.requested_fields
+    # Without `timestamp` in the projection the message time is never even
+    # SELECTed and every content hit can only render the session's start.
+    assert "timestamp" in _FakeSessionDB.requested_fields
     # ID match surfaces first; the content hit on the SAME session is deduped
     # by lineage root (not double-listed); the unrelated content hit follows.
     assert response == {
@@ -133,6 +138,9 @@ def test_desktop_session_search_merges_id_matches_before_content_matches(monkeyp
                 "session_started": 100,
                 # Row recency rides on id-match rows (sessions table)...
                 "last_active": 150,
+                # ...but an id hit matches the CONVERSATION, not a message, so
+                # it carries no message timestamp.
+                "timestamp": None,
             },
             {
                 "id": "content_session",
@@ -147,6 +155,9 @@ def test_desktop_session_search_merges_id_matches_before_content_matches(monkeyp
                 "session_started": 200,
                 # ...while FTS hits have none and leave it null.
                 "last_active": None,
+                # The matched MESSAGE's own time, so a hit in a session older
+                # than the message still reads with the message's date.
+                "timestamp": 260,
             },
         ]
     }
@@ -262,3 +273,68 @@ def test_deep_lineage_search_resolves_tip_from_matched_id(monkeypatch):
     assert row["session_id"] == _DeepLineageSessionDB.TIP
     # Dedupe/lineage bookkeeping stays keyed by the root.
     assert row["lineage_root"] == "s000"
+
+
+class _AgedSessionDB(_FakeSessionDB):
+    """A conversation created long before the message that matches.
+
+    This is the shape that made the bug visible: the search hit's own age and
+    the conversation's age differ by days, and the row rendered the older of
+    the two — the creation date — as if it were when the match happened.
+    """
+
+    SESSION_STARTED = 1_000
+    MATCHED_AT = 900_000
+
+    def search_sessions_by_id(self, *args, **kwargs):
+        return []  # pragma: no cover - content-hit path only in this test
+
+    def search_messages(self, query, source_filter=None, exclude_sources=None,
+                        limit=20, fields=None):
+        assert "timestamp" in fields, "the matched time must be projected"
+        return [{
+            "session_id": "aged_session",
+            "snippet": "content hit from a much later message",
+            "role": "user",
+            "source": "cli",
+            "model": "claude",
+            "session_started": self.SESSION_STARTED,
+            "timestamp": self.MATCHED_AT,
+        }][:limit]
+
+
+def test_session_search_reports_the_matched_message_time_not_the_session_start(monkeypatch):
+    monkeypatch.setattr("hermes_state.SessionDB", _AgedSessionDB)
+
+    [row] = asyncio.run(_rt_sessions.search_sessions(q="needle", limit=1))["results"]
+
+    # The hit's own time — not the conversation's creation date, days earlier.
+    assert row["timestamp"] == _AgedSessionDB.MATCHED_AT
+    # The conversation's start stays available as its own reference.
+    assert row["session_started"] == _AgedSessionDB.SESSION_STARTED
+    # Row recency keeps its documented meaning: absent on content hits.
+    assert row["last_active"] is None
+
+
+def test_session_search_null_message_timestamp_leaves_the_fallback_chain_intact(monkeypatch):
+    class _NoTimestampDB(_AgedSessionDB):
+        def search_messages(self, query, source_filter=None, exclude_sources=None,
+                            limit=20, fields=None):
+            return [{
+                "session_id": "aged_session",
+                "snippet": "content hit",
+                "role": "user",
+                "source": "cli",
+                "model": "claude",
+                "session_started": self.SESSION_STARTED,
+                "timestamp": None,
+            }][:limit]
+
+    monkeypatch.setattr("hermes_state.SessionDB", _NoTimestampDB)
+
+    [row] = asyncio.run(_rt_sessions.search_sessions(q="needle", limit=1))["results"]
+
+    # A genuinely absent message time must not become 0 or vanish — the
+    # clients fall back from here to session_started.
+    assert row["timestamp"] is None
+    assert row["session_started"] == _AgedSessionDB.SESSION_STARTED

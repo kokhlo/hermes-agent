@@ -116,4 +116,39 @@ describe('mergeSearchResults', () => {
 
     expect(merged[0].last_active).toBe(900)
   })
+
+  it('orders a content hit by the matched message time, not the session start', () => {
+    // Two hits in long-lived conversations: the one whose MATCHING message is
+    // newer leads, even though its conversation is the older of the two.
+    const olderConversationNewerMessage: SessionSearchResult = {
+      ...idHit,
+      last_active: null,
+      session_id: '20260101_000000_old1',
+      session_started: 100,
+      snippet: 'matched yesterday',
+      timestamp: 9_000
+    }
+    const newerConversationOlderMessage: SessionSearchResult = {
+      ...idHit,
+      last_active: null,
+      session_id: '20260914_183005_new1',
+      session_started: 5_000,
+      snippet: 'matched last month',
+      timestamp: 2_000
+    }
+
+    const merged = mergeSearchResults(
+      [],
+      'matched',
+      [olderConversationNewerMessage, newerConversationOlderMessage],
+      new Map(),
+      false
+    )
+
+    // Server rank decides order here; the recency only stamps each row.
+    expect(merged[0].last_active).toBe(9_000)
+    expect(merged[0].started_at).toBe(100)
+    expect(merged[1].last_active).toBe(2_000)
+    expect(merged[1].started_at).toBe(5_000)
+  })
 })
