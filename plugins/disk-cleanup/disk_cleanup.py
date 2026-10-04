@@ -144,12 +144,12 @@ def tracked_state_lock() -> Iterator[None]:
         yield
         return
 
-    def _set(held_: bool) -> None:
+    def _flock(unlock: bool) -> None:
         if posix_lock is not None:
-            posix_lock.flock(fd, posix_lock.LOCK_UN if held_ else posix_lock.LOCK_EX)
+            posix_lock.flock(fd, posix_lock.LOCK_UN if unlock else posix_lock.LOCK_EX)
         elif win_lock is not None:
             os.lseek(fd, 0, os.SEEK_SET)
-            win_lock.locking(fd, win_lock.LK_UNLCK if held_ else win_lock.LK_LOCK, 1)
+            win_lock.locking(fd, win_lock.LK_UNLCK if unlock else win_lock.LK_LOCK, 1)
 
     lock_path = _state_file("tracked.json.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -159,12 +159,12 @@ def tracked_state_lock() -> Iterator[None]:
     fd = os.open(lock_path, flags, 0o600)
     _lock_depth.depth = 1
     try:
-        _set(False)
+        _flock(False)
         yield
     finally:
         _lock_depth.depth = 0
         with contextlib.suppress(OSError):
-            _set(True)
+            _flock(True)
         os.close(fd)
 
 
