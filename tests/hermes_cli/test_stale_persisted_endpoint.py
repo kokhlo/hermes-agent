@@ -45,10 +45,23 @@ class TestStalePersistedEndpoint:
         config = {"model": {"provider": "custom", "base_url": LIVE}}
         assert stale_persisted_endpoint("custom", LIVE, config) is False
 
-    def test_equivalent_spellings_are_not_stale(self):
-        config = {"model": {"provider": "custom", "base_url": LIVE}}
-        assert stale_persisted_endpoint("custom", LIVE + "/", config) is False
-        assert stale_persisted_endpoint("custom", LIVE.replace("http://", "HTTP://"), config) is False
+    def test_same_server_reached_by_loopback_and_lan_keeps_its_route(self):
+        # The normal situation on a Tailscale/LAN box: one server, two spellings, one port. Whole-URL
+        # equality would retire this perfectly good route and quietly reroute the session.
+        config = {"model": {"provider": "custom", "base_url": "http://127.0.0.1:6066/v1"}}
+        assert stale_persisted_endpoint("custom", LIVE, config) is False
+        assert stale_persisted_endpoint("custom", "http://192.168.0.16:6066/v1", config) is False
+
+    def test_mdns_name_for_the_same_port_keeps_its_route(self):
+        config = {"model": {"provider": "custom", "base_url": "http://llm-box.local:6066/v1"}}
+        assert stale_persisted_endpoint("custom", LIVE, config) is False
+
+    def test_default_port_spellings_are_never_a_move(self):
+        # Neither side names a port, so there is nothing to compare — https://host and
+        # https://host/v1 are the same endpoint, not a re-pointed one.
+        config = {"model": {"provider": "anthropic", "base_url": "https://api.anthropic.com"}}
+        assert stale_persisted_endpoint("anthropic", "https://api.anthropic.com/v1", config) is False
+        assert stale_persisted_endpoint("anthropic", "", config) is False
 
     def test_named_provider_re_aimed_in_config_is_stale(self):
         config = {"providers": {"my-llm": {"base_url": LIVE, "key_env": "MY_LLM_KEY"}}}

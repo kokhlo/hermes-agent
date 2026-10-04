@@ -134,16 +134,29 @@ def stale_persisted_endpoint(provider: Any, base_url: Any, config: Any = None) -
     A stored route is a record of what the session last ran, not an instruction: a provider whose
     configured endpoint moved (``model.base_url`` re-pointed, a ``providers:`` entry re-aimed) must
     not keep sending traffic to the address the row remembers, across gateway restarts included —
-    nothing about a restart re-reads config for an already-persisted row. Only an endpoint config
-    names today can contradict the row; a provider with no configured endpoint keeps its snapshot,
-    since nothing claims that URL and a deliberate one-off route is indistinguishable from a stale
-    one by inspection alone.
+    nothing about a restart re-reads config for an already-persisted row.
+
+    A move is judged by the **explicit port**, not by the whole URL. The same server is routinely
+    spelled two ways — loopback vs LAN address vs an mDNS name — and on a Tailscale/LAN box that
+    difference is normal, so full URL equality would retire a perfectly good route. An explicit port
+    that differs is the one unambiguous signal that the endpoint a row remembers is gone; a host-only
+    difference keeps its snapshot. Only an endpoint config names today can contradict the row, so a
+    provider with no configured endpoint is never touched.
     """
-    stored = normalize_route_base_url(base_url)
-    if not stored:
+    if not normalize_route_base_url(base_url):
         return False
-    configured = normalize_route_base_url(configured_endpoint_for(provider, config))
-    return bool(configured) and configured != stored
+    stored_port = _explicit_port(base_url)
+    configured_port = _explicit_port(configured_endpoint_for(provider, config))
+    return bool(stored_port) and bool(configured_port) and stored_port != configured_port
+
+
+def _explicit_port(base_url: Any) -> int:
+    """The port written in the URL, or 0 for a default/implicit one — comparison is about the port
+    the operator named, so ``https://host`` and ``https://host/v1`` must both read as 0."""
+    try:
+        return int(urlsplit(str(base_url or "").strip()).port or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def drop_stale_model_route(model_cfg: Any, provider: Any, config: Any = None) -> "tuple[dict[str, Any], bool]":
