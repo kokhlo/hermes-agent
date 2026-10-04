@@ -128,6 +128,42 @@ def _container_identity(shared_key: str = "") -> str:
     return f"{_sanitize_label_value(shared_key)[:50]}-{digest}"
 
 
+def _bind_source_path(spec: str) -> str | None:
+    """Host path of a ``-v host:container[:mode]`` spec, or ``None`` for a non-bind arg."""
+    if spec in ("-v", "--mount") or ":" not in spec:
+        return None  # the flag element itself, or a non-bind arg (tmpfs modes etc.)
+    parsed = _split_volume_spec(spec)
+    return parsed[0] if parsed is not None else spec.split(":", 1)[0]
+
+
+def _file_source_identity(spec: str) -> str | None:
+    """``dev:ino`` when *spec* binds an existing regular file into the container.
+
+    A file bind is resolved to an inode when the container starts, so a host-side
+    atomic rewrite — write-temp + ``rename()``, what every safe-write path does — leaves
+    the container reading the pre-rename content for the rest of its life while the host
+    has already moved on, with no error anywhere. The kernel keeps the old name in its
+    mount table marked deleted, so the container cannot even notice. Folding the
+    identity into the reuse label makes such a rewrite miss the label filter and start a
+    fresh container bound to the live file.
+
+    Directory sources return ``None``: a directory bind follows renames *inside* it, so
+    hashing a directory inode would force a fresh container on every file written under
+    ``skills/`` or ``cache/``. An in-place write keeps the inode, so edits that already
+    stay live in the container do not churn the long-lived sandbox either.
+    """
+    source = _bind_source_path(spec)
+    if source is None:
+        return None
+    try:
+        if not os.path.isfile(source):
+            return None
+        stat_result = os.stat(source)
+    except OSError:  # unreadable or vanished source — hash the path alone, as before
+        return None
+    return f"{stat_result.st_dev}:{stat_result.st_ino}"
+
+
 def _is_volatile_mount_spec(spec: str) -> bool:
     """True when *spec* is a ``host:container[:mode]`` mount whose host source is a
     per-process tempdir (a ``mkdtemp`` under the system temp), so its path is random
@@ -138,10 +174,9 @@ def _is_volatile_mount_spec(spec: str) -> bool:
     fresh ``mkdtemp`` per process. Stable host paths — including a symlink-free
     skills dir, which mounts directly — never sit under the process tempdir.
     """
-    if spec in ("-v", "--mount") or ":" not in spec:
-        return False  # the flag element itself, or a non-bind arg (tmpfs modes etc.)
-    parsed = _split_volume_spec(spec)
-    source = parsed[0] if parsed is not None else spec.split(":", 1)[0]
+    source = _bind_source_path(spec)
+    if source is None:
+        return False
     if _is_windows_drive_path(source):
         return False  # drive-letter hosts can never be the POSIX process tempdir
     try:
@@ -162,12 +197,24 @@ def _reuse_environment_fingerprint(*, image: str, mount_args: list[str], hermes_
     it made the label differ across processes and cross-process container reuse never
     matched for users with any symlink under ``skills/``. The container path stays in the
     hash, so moving where that mount lands still forces a fresh container.
+
+    A mount whose source is a regular file also carries that file's ``dev:ino``. Paths
+    alone say nothing about *which* file the container was handed: an atomic rewrite
+    replaces the name with a new inode and the running container keeps reading the
+    unlinked old one until it is replaced, so ``config.yaml`` and ``MEMORY.md`` — the two
+    most frequently rewritten profile files, both written via write-temp + ``rename()`` —
+    could go stale in a reused sandbox for hours. Identity in the label makes reuse miss
+    and start a container bound to the live file, while an in-place write (inode
+    unchanged) and every directory bind keep reusing as before.
     """
     normalized_home = os.path.normcase(os.path.abspath(os.path.expanduser(hermes_home)))
-    canonical_mounts = [
-        (f"<volatile-tempdir-mount>:{spec.split(':', 1)[1]}"
-         if _is_volatile_mount_spec(spec) else spec)
-        for spec in mount_args]
+    canonical_mounts = []
+    for spec in mount_args:
+        if _is_volatile_mount_spec(spec):
+            canonical_mounts.append(f"<volatile-tempdir-mount>:{spec.split(':', 1)[1]}")
+            continue
+        identity = _file_source_identity(spec)
+        canonical_mounts.append(spec if identity is None else f"{spec}<{identity}>")
     payload = json.dumps(
         {"image": image, "mount_args": canonical_mounts, "hermes_home": normalized_home},
         sort_keys=True, separators=(",", ":"))

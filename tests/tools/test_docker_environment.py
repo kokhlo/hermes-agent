@@ -2,6 +2,8 @@ import logging
 import os
 import re
 from io import StringIO
+from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 
@@ -776,6 +778,85 @@ def test_symlinked_skills_tree_reuses_container_across_processes(monkeypatch, tm
     changed = dict(config, volumes=["volume-b:/workspace"])
     third = _make_dummy_env(**changed)
     assert third._labels["hermes-environment"] != first._labels["hermes-environment"]
+
+
+def _fingerprint(*mount_args: str, image: str = "python:3.11", hermes_home: str = "/h") -> str:
+    return docker_env._reuse_environment_fingerprint(
+        image=image, mount_args=list(mount_args), hermes_home=hermes_home)
+
+
+def test_atomic_rewrite_of_a_bound_file_forces_a_fresh_container(tmp_path):
+    """A file bind pins an inode, so the safe-write pattern (write-temp + ``rename()``)
+    leaves a running sandbox reading the unlinked old file with no error anywhere. The
+    reuse label must therefore carry the file's identity, not just its path — this is the
+    ``MEMORY.md`` / ``config.yaml`` staleness that survives for the container's lifetime.
+    """
+    config = tmp_path / "config.yaml"
+    config.write_text("version: 1\n")
+    mount = f"{config}:/root/.hermes/profiles/p/config.yaml:ro"
+
+    before = _fingerprint(mount)
+    pending = tmp_path / "config.yaml.tmp"
+    pending.write_text("version: 2\n")
+    pending.rename(config)
+    assert _fingerprint(mount) != before
+
+    # ...and a plain re-run with the file untouched still reuses.
+    assert _fingerprint(mount) == _fingerprint(mount)
+
+
+def test_in_place_write_of_a_bound_file_still_reuses_the_container(tmp_path):
+    """The complement of the rename case: a truncating write keeps the inode, so the
+    container already sees the new content and reuse must not churn."""
+    config = tmp_path / "config.yaml"
+    config.write_text("version: 1\n")
+    mount = f"{config}:/root/.hermes/profiles/p/config.yaml:ro"
+
+    before = _fingerprint(mount)
+    with open(config, "w") as handle:  # truncate + write, inode preserved
+        handle.write("version: 2\n")
+    assert _fingerprint(mount) == before
+
+
+def test_rename_inside_a_bound_directory_does_not_churn_reuse(tmp_path):
+    """Directory binds follow renames *inside* them, so they must stay path-only —
+    otherwise every file written under ``skills/`` or ``cache/`` would start a fresh
+    container and destroy the long-lived sandbox contract."""
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    mount = f"{skills}:/root/.hermes/skills:ro"
+
+    before = _fingerprint(mount)
+    (skills / "fresh-skill").mkdir()
+    (skills / "SKILL.md").write_text("# skill")
+    (skills / "SKILL.md").rename(skills / "SKILL.md.renamed")
+    assert _fingerprint(mount) == before
+
+
+def test_missing_file_source_is_hashed_by_path_alone(tmp_path):
+    """An unstattable source must not raise and must not make reuse *more* likely than
+    the path-only behaviour it had before."""
+    mount = f"{tmp_path / 'absent.json'}:/root/.hermes/absent.json:ro"
+    assert _fingerprint(mount) == _fingerprint(mount)
+
+
+def test_file_identity_is_not_hashed_for_a_volatile_tempdir_mount():
+    """The #131895 contract still holds for *file* sources: a per-process tempdir copy
+    has a random path AND a random inode, so hashing identity there would make the label
+    differ across processes and cross-process reuse would never match again. Both copies
+    below are genuine ``mkdtemp`` dirs under the real system temp, which is exactly what
+    ``_safe_skills_path`` produces."""
+    digests = []
+    for _ in range(2):
+        copy_dir = Path(tempfile.mkdtemp(prefix="hermes-skills-safe-"))
+        try:
+            skill = copy_dir / "SKILL.md"
+            skill.write_text("# skill")
+            assert docker_env._is_volatile_mount_spec(f"{skill}:/root/.hermes/skills/SKILL.md:ro")
+            digests.append(_fingerprint(f"{skill}:/root/.hermes/skills/SKILL.md:ro"))
+        finally:
+            shutil.rmtree(copy_dir, ignore_errors=True)
+    assert digests[0] == digests[1]
 
 
 def test_labels_attribute_populated_after_init(monkeypatch):
