@@ -782,11 +782,37 @@ class GatewayInboundMixin:
         self._queue_or_replace_pending_event(_quick_key, event)
         return None
 
-    def _hm_quick_commands(self) -> dict:
-        """User-defined ``quick_commands`` mapping from config (empty dict when unset/malformed)."""
-        cfg = self.config
+    def _hm_quick_commands(self, source: Optional[SessionSource] = None) -> dict:
+        """User-defined ``quick_commands`` mapping for the profile that received *source*.
+
+        Under ``multiplex_profiles`` ``self.config`` is the launch profile's alone, so a quick command
+        a user defined in the ``config.yaml`` of the bot they addressed was never consulted and answered
+        "Unknown command" — while the gateway had already loaded that very file into
+        ``_profile_configs`` (#132517). Resolution follows the transport (bot-owning) profile exactly as
+        ``policy_for_runner_source`` does for slash gating; unlike that authorization decision a missing
+        cache entry falls back to the launch config instead of failing closed, so nothing that resolves
+        today stops resolving.
+        """
+        cfg = self._hm_quick_command_config(source)
         qc = (cfg.get("quick_commands") if isinstance(cfg, dict) else getattr(cfg, "quick_commands", None)) or {}
         return qc if isinstance(qc, dict) else {}
+
+    def _hm_quick_command_config(self, source: Optional[SessionSource]):
+        """The config a message from *source* reads its ``quick_commands`` from: the served profile's own
+        config when a multiplexed gateway routed the message there, else the launch profile's."""
+        cfg = self.config
+        if not getattr(cfg, "multiplex_profiles", False) or source is None:
+            return cfg
+        from gateway.session_identity import identity_of
+
+        identity = identity_of(source)
+        owner = identity.transport_profile if identity is not None else getattr(source, "profile", None)
+        primary = getattr(self, "_primary_profile_name", None) or "default"
+        if owner and owner != primary:
+            served = (getattr(self, "_profile_configs", None) or {}).get(owner)
+            if served is not None:
+                return served
+        return cfg
 
     @staticmethod
     def _hm_expand_alias_quick_command(event: "MessageEvent", qcmd: dict) -> Optional[str]:
@@ -865,7 +891,7 @@ class GatewayInboundMixin:
         # --provider openrouter reach the /model handler. Built-ins keep precedence: aliases only
         # need early handling when the typed command is not already known.
         if command and _cmd_def is None:
-            qcmd = self._hm_quick_commands().get(command)
+            qcmd = self._hm_quick_commands(source).get(command)
             if qcmd is not None and qcmd.get("type") == "alias":
                 new_command = self._hm_expand_alias_quick_command(event, qcmd)
                 if new_command is not None:
@@ -1091,7 +1117,7 @@ class GatewayInboundMixin:
             return True, t("gateway.busy.drain_rejected_new_work", action=self._status_action_gerund()), command
 
         # User-defined quick commands (bypass agent loop, no LLM call)
-        qcmd = self._hm_quick_commands().get(command) if command else None
+        qcmd = self._hm_quick_commands(source).get(command) if command else None
         if qcmd is not None:
             # Quick commands are slash capabilities too — and type:exec ones run a shell command in
             # the gateway process. They are never in the registry, so the early gate never fires for
