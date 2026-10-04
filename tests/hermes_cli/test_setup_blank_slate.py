@@ -119,3 +119,82 @@ class TestBlankSlateFork:
         assert walked["called"] is False
         # Finish-now path records the skill opt-out (no bundled skills).
         assert opted_out["value"] is True
+
+
+class TestBlankSlateTakesBackSeededSkills:
+    """The installer seeds the whole bundled catalog *before* setup runs, so Blank Slate has to
+    take that copy back off disk. The opt-out marker only stops future syncs from adding more —
+    on its own it leaves every skill the installer already copied sitting there (#132883)."""
+
+    def _installer_seeded_profile(self, tmp_path):
+        """A bundled source, plus the profile the installer leaves behind: pristine bundled
+        skills, one the user has since edited, and one hand-written local skill."""
+        from contextlib import ExitStack
+        from unittest.mock import patch
+
+        bundled = tmp_path / "bundled"
+        for name in ("hermes-agent", "alpha", "beta"):
+            d = bundled / name
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(f"---\nname: {name}\n---\nbody {name}\n")
+
+        skills_dir = tmp_path / "user_skills"
+        home = tmp_path / "home"
+        home.mkdir()
+
+        stack = ExitStack()
+        stack.enter_context(patch("tools.skills_sync._get_bundled_dir", return_value=bundled))
+        stack.enter_context(patch("tools.skills_sync._get_optional_dir",
+                                  return_value=bundled.parent / "optional-skills"))
+        stack.enter_context(patch("tools.skills_sync.SKILLS_DIR", skills_dir))
+        stack.enter_context(patch("tools.skills_sync.MANIFEST_FILE", skills_dir / ".bundled_manifest"))
+        stack.enter_context(patch("tools.skills_sync.HERMES_HOME", home))
+
+        from tools.skills_sync import sync_skills
+        sync_skills(quiet=True)  # what install.sh did before the wizard ever started
+        (skills_dir / "beta" / "SKILL.md").write_text("---\nname: beta\n---\nMY EDITS\n")
+        (skills_dir / "mine").mkdir()
+        (skills_dir / "mine" / "SKILL.md").write_text("---\nname: mine\n---\nlocal\n")
+        return stack, skills_dir, home
+
+    def _patch_wizard(self, monkeypatch):
+        import hermes_cli.setup as s
+        monkeypatch.setattr(s, "setup_model_provider", lambda cfg, **k: None)
+        monkeypatch.setattr(s, "setup_terminal_backend", lambda cfg, **k: None)
+        monkeypatch.setattr(s, "save_config", lambda cfg: None)
+        monkeypatch.setattr(s, "print_header", lambda *a, **k: None)
+        monkeypatch.setattr(s, "print_info", lambda *a, **k: None)
+        monkeypatch.setattr(s, "print_success", lambda *a, **k: None)
+        monkeypatch.setattr(s, "print_warning", lambda *a, **k: None)
+
+    def test_finish_now_leaves_only_essential_and_user_skills(self, monkeypatch, tmp_path):
+        """Blank Slate promises the catalog is gone, yet only the essential skill should be: the
+        user's own edits and hand-written skills are not the wizard's to delete."""
+        import hermes_cli.setup as s
+        stack, skills_dir, home = self._installer_seeded_profile(tmp_path)
+        with stack:
+            self._patch_wizard(monkeypatch)
+            monkeypatch.setattr(s, "prompt_choice", lambda *a, **k: 0)  # "finish now"
+
+            setup_quick._run_blank_slate_setup({}, home, is_existing=False)
+
+            left = sorted(p.name for p in skills_dir.iterdir() if p.is_dir())
+            assert left == ["beta", "hermes-agent", "mine"]
+            assert "MY EDITS" in (skills_dir / "beta" / "SKILL.md").read_text()
+            # The essential skill the system prompt points at survived the removal.
+            assert (skills_dir / "hermes-agent" / "SKILL.md").exists()
+
+    def test_declining_the_catalog_in_the_walkthrough_removes_it_too(self, monkeypatch, tmp_path):
+        """Answering "No" to the bundled-skills question takes the same path, so the seeded copy
+        has to go there as well — otherwise only one of the two Blank Slate exits behaves."""
+        import hermes_cli.setup as s
+        stack, skills_dir, home = self._installer_seeded_profile(tmp_path)
+        with stack:
+            self._patch_wizard(monkeypatch)
+            monkeypatch.setattr(s, "prompt_yes_no", lambda *a, **k: False)
+            monkeypatch.setattr(s, "prompt_choice", lambda *a, **k: 0)
+
+            setup_quick._run_blank_slate_setup({}, home, is_existing=False)
+
+            left = sorted(p.name for p in skills_dir.iterdir() if p.is_dir())
+            assert left == ["beta", "hermes-agent", "mine"]
