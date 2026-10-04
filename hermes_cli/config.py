@@ -696,9 +696,65 @@ def _phantom_sibling(container: dict, part: str) -> Optional[str]:
     return next((k for k in container if isinstance(k, str) and k.startswith(prefix)), None)
 
 
+def _list_entry_index(container: list, parts: list) -> Optional[Tuple[int, int]]:
+    """Resolve a list path segment to ``(index, n_consumed)``, or None when nothing matches.
+
+    A segment that parses as an integer indexes by position, exactly as before. Any other segment
+    addresses the entry whose ``name`` field equals the dot-join of the next N segments, longest match
+    first like ``_greedy_literal_match``: ``custom_providers.gpt5.eu.base_url`` reaches the entry named
+    ``gpt5.eu`` instead of splitting on its dot. Position is what a user cannot rely on for a name-keyed
+    list — entries get reordered and appended, and every other path in this module already matches these
+    same entries by ``name`` (``_items_by_unique_name``) so templates survive a reorder. Two entries
+    carrying one name cannot be told apart, so that is refused rather than resolved to whichever came
+    first.
+    """
+    try:
+        return int(parts[0]), 1
+    except ValueError:
+        pass
+    positions: Dict[str, list] = {}
+    for position, item in enumerate(container):
+        if isinstance(item, dict) and isinstance(item.get("name"), str):
+            positions.setdefault(item["name"], []).append(position)
+    for n in range(len(parts), 0, -1):
+        matches = positions.get(".".join(parts[:n]))
+        if matches:
+            if len(matches) > 1:
+                raise ValueError(
+                    f"{len(matches)} entries of this list are named {parts[0]!r} — address it by its "
+                    f"numeric index ({', '.join(str(p) for p in matches)}) instead")
+            return matches[0], n
+    return None
+
+
+def _list_index_refusal(dotted_key: str, index: int, length: int) -> str:
+    """A numeric segment that parses but points past the end. Growing the list is not this
+    command's job: a caller that means to append passes the whole list literal instead."""
+    return (f"Cannot navigate into list at key {dotted_key!r}: index {index} is out of range for a "
+            f"list of {length} entr{'y' if length == 1 else 'ies'}.")
+
+
+def _list_navigation_refusal(dotted_key: str, part: str, container: list) -> str:
+    """Why a list segment resolved to nothing, naming the entries that DO exist — the typo is the
+    usual reason, and the list of names is what makes it fixable without opening the file."""
+    names = [item["name"] for item in container
+             if isinstance(item, dict) and isinstance(item.get("name"), str)]
+    if not names:
+        return (f"Cannot navigate into list at key {dotted_key!r}: segment {part!r} is not a numeric "
+                f"index, and this list has no named entries. Address it by numeric index.")
+    shown = ", ".join(names[:8])
+    if len(names) > 8:
+        shown += f", ... (+{len(names) - 8} more)"
+    closest = _suggest_closest_key(part, set(names))
+    hint = f" Did you mean {closest!r}?" if closest and closest != part else ""
+    return (f"Cannot navigate into list at key {dotted_key!r}: segment {part!r} is not a numeric "
+            f"index and no entry is named {part!r}.\n  Entries in this list: {shown}.{hint}")
+
+
 def _set_nested(config, dotted_key: str, value):
     """Set a value at a dotted key path, creating intermediate dicts on demand.
-    Numeric segments index lists; the index must already exist (lists are never grown).
+    Numeric segments index lists; the index must already exist (lists are never grown). A non-numeric
+    segment in a list of named mappings addresses the entry by its ``name`` (see ``_list_entry_index``).
 
     Guards against #17876: before this fix the code unconditionally replaced any non-dict value (including
     lists) with ``{}``, silently destroying list-typed config like ``custom_providers`` whenever a caller
@@ -716,17 +772,18 @@ def _set_nested(config, dotted_key: str, value):
         remaining = parts[i:]
         at_leaf = len(remaining) == 1
         if isinstance(current, list):
-            part = remaining[0]
-            if at_leaf:
-                current[int(part)] = value
+            resolved = _list_entry_index(current, remaining)
+            if resolved is None:
+                raise TypeError(_list_navigation_refusal(dotted_key, remaining[0], current))
+            index, consumed = resolved
+            if not -len(current) <= index < len(current):
+                raise TypeError(_list_index_refusal(dotted_key, index, len(current)))
+            if i + consumed == len(parts):
+                current[index] = value
                 return
-            try:
-                current = current[int(part)]
-            except (TypeError, ValueError):
-                raise TypeError(
-                    f"Cannot navigate into list at key {dotted_key!r}: "
-                    f"segment {part!r} is not a numeric index")
-            i += 1
+            current = current[index]
+            i += consumed
+            continue
         elif isinstance(current, dict):
             match = _greedy_literal_match(current, remaining)
             if match is not None:
@@ -798,11 +855,18 @@ def _locate_nested(config, parts: list):
         remaining = parts[i:]
         if isinstance(current, list):
             try:
-                key = int(remaining[0])
-                current[key]
-            except (TypeError, ValueError, IndexError):
+                resolved = _list_entry_index(current, remaining)
+            except ValueError:
+                # An ambiguous name addresses nothing, which is what a read reports and what an
+                # unset leaves alone.
                 return None
-            consumed = 1
+            if resolved is None:
+                return None
+            key, consumed = resolved
+            try:
+                current[key]
+            except IndexError:
+                return None
         elif isinstance(current, dict):
             match = _greedy_literal_match(current, remaining)
             if match is None:
@@ -3588,7 +3652,9 @@ def set_config_value(key: str, value: str, force: bool = False):
     _old_provider = _model_val.get("provider") if isinstance(_model_val, dict) else None
     try:
         _set_nested(user_config, key, value)
-    except ValueError as e:
+    except (TypeError, ValueError) as e:
+        # Navigation refusals (no such entry in a list, no such key in a scalar) are a wrong path the
+        # user typed, not a crash: report the path they asked for instead of a traceback.
         _exit_invalid(f"✗ {e}")
     if legacy_key and _unset_nested(user_config, legacy_key):
         print(f"  (removed the shadowed {legacy_key} duplicate)")
