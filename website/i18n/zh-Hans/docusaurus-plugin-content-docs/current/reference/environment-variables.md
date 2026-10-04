@@ -588,6 +588,8 @@ Graph 事件（Teams 会议、日历、聊天等）的入站变更通知监听�
 
 官方 Docker 镜像会设置 `HERMES_WRITE_SAFE_ROOT=/opt/data` 与 `HERMES_HOME=/opt/data`，防止 agent 逃出挂载的数据卷。
 
+这些根目录是在运行 Hermes 的机器上衡量的。当 `terminal.backend` 为非本地后端（ssh、docker、modal、daytona）时，文件工具实际在后端主机上执行，因此这些写入不会与本变量比对——否则任何远程路径都会落在容器目录之外。凭据路径黑名单对远程写入仍然生效；详见 [File write safety](../user-guide/security.md#file-write-safety)。
+
 **除非有意沙箱化写入，否则不要将此变量加入 `~/.hermes/.env`。** 常见错误是将其指向项目目录，却期望 agent 编辑 `~/.hermes/cron/jobs.json`、`~/.hermes/skills/` 或 profile 下的脚本——这些路径在沙箱外，每次 `write_file`/`patch` 都会失败并返回 `outside HERMES_WRITE_SAFE_ROOT` 错误。
 
 若需同时允许工作区和 Hermes 状态目录，列出两个前缀（顺序无关）：

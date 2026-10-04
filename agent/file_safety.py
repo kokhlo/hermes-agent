@@ -246,12 +246,21 @@ def build_write_approval_paths(home: str) -> set[str]:
 _HERMES_PROTECTED_SUBPATHS = ("state.db", "sessions", "mcp-tokens", "pairing", "vault", "browser-profile")
 
 
-def _classify_write_denial(path: str, *, entry: bool = False) -> Optional[str]:
+def _classify_write_denial(path: str, *, entry: bool = False,
+                           host_paths: bool = True) -> Optional[str]:
     """Return ``'credential'``, ``'safe_root'``, ``'nt_namespace'``, or ``None`` if writes are allowed.
 
     ``entry=True`` is for ops that unlink/rename the directory entry itself (a
     symlink, not its target): the entry — parent realpath'd, final component
-    kept — is vetted as well as the target it resolves to."""
+    kept — is vetted as well as the target it resolves to.
+
+    ``host_paths=False`` marks ``path`` as living on a terminal backend's host
+    rather than the Hermes host, which is resolved HERE. ``HERMES_WRITE_SAFE_ROOT``
+    pins directories on this machine, so measuring another machine's path against
+    it blocks work the operator asked for (the stock image pins ``/opt/data``, and
+    an ssh backend's ``/home/<user>`` is by definition outside it). The credential
+    denylist keeps applying either way: its entries name the same sensitive files
+    wherever they live."""
     # NT/device-namespace check runs on the RAW string, before realpath():
     # resolving such a path is itself the NTLM-leak trigger, and namespace
     # prefixes defeat string-prefix denylist comparison after normalization.
@@ -266,15 +275,16 @@ def _classify_write_denial(path: str, *, entry: bool = False) -> Optional[str]:
 
     if is_protected_path(path) or (entry and is_protected_path(path, follow=False)):
         return "credential"
-    denial = _classify_resolved_write_denial(homes, resolved)
+    denial = _classify_resolved_write_denial(homes, resolved, host_paths=host_paths)
     if denial or not entry:
         return denial
     parent, leaf = split_entry(os.path.expanduser(str(path)))
     entry_path = os.path.join(os.path.realpath(parent or "."), leaf)
-    return _classify_resolved_write_denial(homes, entry_path)
+    return _classify_resolved_write_denial(homes, entry_path, host_paths=host_paths)
 
 
-def _classify_resolved_write_denial(homes: set[str], resolved: str) -> Optional[str]:
+def _classify_resolved_write_denial(homes: set[str], resolved: str,
+                                    *, host_paths: bool = True) -> Optional[str]:
     """Credential / protected-subpath / safe-root verdict for an already-resolved path."""
     # Approval-gated paths are allowed at this layer so interactive tools can
     # prompt; checked first so the ``.ssh/`` prefix deny doesn't swallow them.
@@ -295,21 +305,22 @@ def _classify_resolved_write_denial(homes: set[str], resolved: str) -> Optional[
                     return "credential"
 
     safe_roots = get_safe_write_roots()
-    if safe_roots and not any(_is_under(resolved, root) for root in safe_roots):
+    if host_paths and safe_roots and not any(_is_under(resolved, root) for root in safe_roots):
         return "safe_root"
 
     return None
 
 
-def is_write_denied(path: str) -> bool:
+def is_write_denied(path: str, *, host_paths: bool = True) -> bool:
     """Return True if path is blocked by the write denylist or safe root."""
-    return _classify_write_denial(path) is not None
+    return _classify_write_denial(path, host_paths=host_paths) is not None
 
 
-def get_write_denied_error(path: str, *, verb: str = "Write", entry: bool = False) -> Optional[str]:
+def get_write_denied_error(path: str, *, verb: str = "Write", entry: bool = False,
+                           host_paths: bool = True) -> Optional[str]:
     """Return a user/model-facing error when writes to ``path`` are blocked
-    (``entry``: see :func:`_classify_write_denial`)."""
-    denial = _classify_write_denial(path, entry=entry)
+    (``entry``/``host_paths``: see :func:`_classify_write_denial`)."""
+    denial = _classify_write_denial(path, entry=entry, host_paths=host_paths)
     if denial == "safe_root":
         roots_display = os.pathsep.join(sorted(get_safe_write_roots()))
         return (

@@ -224,6 +224,17 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         self._rg_resolution_cache: Dict[str, str] = {}
         self._rg_modified_capability: Dict[str, Optional[str]] = {}
 
+    def _write_targets_host(self) -> bool:
+        """True when a write target names a path on the Hermes host itself.
+
+        Every operation runs through ``self.env.execute()``, so under a non-local
+        backend (docker/ssh/modal/daytona) the path belongs to another machine
+        while the write guard resolves it HERE — the same controller-vs-backend
+        split ``SearchMixin._macos_search_exclusions`` gates on. Envs without the
+        flag keep host semantics.
+        """
+        return getattr(self.env, "is_local", True) is not False
+
     def _exec(self, command: str, cwd: str = None, timeout: int = None,
               stdin_data: str = None) -> ExecuteResult:
         """Run ``command`` on the backend. cwd: explicit arg → live ``env.cwd`` →
@@ -1297,7 +1308,8 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         path = self._expand_path(path)
         # Delete removes the directory entry (a symlink itself, not its target), so
         # the guards vet the entry as well as the target it resolves to.
-        denied = get_write_denied_error(path, verb="Delete", entry=True)
+        denied = get_write_denied_error(path, verb="Delete", entry=True,
+                                         host_paths=self._write_targets_host())
         if denied:
             return WriteResult(error=denied)
         # Path baked in via repr() for shell-independent quoting; no
@@ -1336,7 +1348,8 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         dst = self._expand_path(dst)
         # Entry-level op like delete_file: vet both entries, not just their targets.
         for p in (src, dst):
-            denied = get_write_denied_error(p, verb="Move", entry=True)
+            denied = get_write_denied_error(p, verb="Move", entry=True,
+                                             host_paths=self._write_targets_host())
             if denied:
                 return WriteResult(error=denied)
         result = self._exec(f"mv {self._escape_shell_arg(src)} {self._escape_shell_arg(dst)}")
@@ -1504,7 +1517,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         caller already has (skips the read); BOM detection always probes disk.
         """
         path = self._expand_path(path)
-        denied = get_write_denied_error(path)
+        denied = get_write_denied_error(path, host_paths=self._write_targets_host())
         if denied:
             return WriteResult(error=denied)
         refused = self._reject_unencodable(path, content)
@@ -1605,7 +1618,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         """Replace text in a file using fuzzy matching (``old_string`` must be
         unique unless ``replace_all``). Returns a PatchResult with diff + lint."""
         path = self._expand_path(path)
-        denied = get_write_denied_error(path)
+        denied = get_write_denied_error(path, host_paths=self._write_targets_host())
         if denied:
             return PatchResult(error=denied)
         data, failed = self._read_exact_bytes(path)

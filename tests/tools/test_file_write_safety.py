@@ -229,6 +229,152 @@ class TestSafeRootDenialMessageIntegration:
         assert inside.read_text(encoding="utf-8") == "content"
 
 
+class TestSafeRootIsHostScoped:
+    """HERMES_WRITE_SAFE_ROOT pins directories on the HERMES host (#132620).
+
+    A non-local terminal backend (ssh/docker/modal/daytona) executes every file
+    operation on another machine, so the path is remote while the guard resolves
+    it here: the stock image's ``/opt/data`` refused every remote write while the
+    terminal tool over the same connection created the very same file. The
+    credential denylist is exact-path and still applies — only the safe-root
+    comparison is host-relative.
+    """
+
+    @pytest.fixture
+    def ops(self, tmp_path: Path):
+        from tools.environments.local import LocalEnvironment
+        from tools.file_operations import ShellFileOperations
+        env = LocalEnvironment(cwd=str(tmp_path))
+        # A real environment, flagged remote: every command still runs locally so
+        # the assertions can read the bytes, but the guard must treat the target
+        # as another machine's path.
+        env.is_local = False
+        return ShellFileOperations(env, cwd=str(tmp_path))
+
+    @pytest.fixture
+    def safe_root(self, tmp_path: Path) -> Path:
+        root = tmp_path / "workspace"
+        root.mkdir()
+        return root
+
+    def test_write_file_outside_safe_root_allowed(self, ops, safe_root, tmp_path: Path, monkeypatch):
+        remote = tmp_path / "remote_home"
+        remote.mkdir()
+        target = remote / "notes.txt"
+        monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(safe_root))
+
+        res = ops.write_file(str(target), "content")
+        assert res.error is None, res.error
+        assert target.read_text(encoding="utf-8") == "content"
+
+    def test_local_backend_still_denied_same_path(self, ops, safe_root, tmp_path: Path, monkeypatch):
+        """The flag is the whole difference: ``is_local=True`` keeps the denial."""
+        remote = tmp_path / "remote_home"
+        remote.mkdir()
+        target = remote / "notes.txt"
+        monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(safe_root))
+        ops.env.is_local = True
+
+        res = ops.write_file(str(target), "content")
+        assert res.error is not None
+        assert "outside HERMES_WRITE_SAFE_ROOT" in res.error
+        assert not target.exists()
+
+    def test_patch_outside_safe_root_allowed(self, ops, safe_root, tmp_path: Path, monkeypatch):
+        remote = tmp_path / "remote_home"
+        remote.mkdir()
+        target = remote / "notes.txt"
+        target.write_text("before\n", encoding="utf-8")
+        monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(safe_root))
+
+        res = ops.patch_replace(str(target), "before", "after")
+        assert res.success, res.error
+        assert target.read_text(encoding="utf-8") == "after\n"
+
+    def test_delete_outside_safe_root_allowed(self, ops, safe_root, tmp_path: Path, monkeypatch):
+        remote = tmp_path / "remote_home"
+        remote.mkdir()
+        target = remote / "scratch.txt"
+        target.write_text("x\n", encoding="utf-8")
+        monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(safe_root))
+
+        res = ops.delete_file(str(target))
+        assert res.error is None, res.error
+        assert not target.exists()
+
+    def test_move_outside_safe_root_allowed(self, ops, safe_root, tmp_path: Path, monkeypatch):
+        remote = tmp_path / "remote_home"
+        remote.mkdir()
+        src, dst = remote / "a.txt", remote / "b.txt"
+        src.write_text("payload\n", encoding="utf-8")
+        monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(safe_root))
+
+        res = ops.move_file(str(src), str(dst))
+        assert res.error is None, res.error
+        assert dst.read_text(encoding="utf-8") == "payload\n"
+
+    def test_credential_denylist_still_applies_remotely(self, ops, safe_root, monkeypatch):
+        """Only the safe root is host-scoped; ~/.ssh/id_rsa is denied either way."""
+        monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(safe_root))
+
+        res = ops.write_file(os.path.expanduser("~/.ssh/id_rsa"), "content")
+        assert res.error is not None
+        assert "protected system/credential file" in res.error
+
+    def test_env_without_is_local_flag_keeps_host_semantics(self, safe_root, tmp_path: Path, monkeypatch):
+        """A backend that never declares itself remote must not silently opt out."""
+        from tools.file_operations import ShellFileOperations
+
+        class _Undeclared:
+            cwd = str(tmp_path)
+
+            def execute(self, command, cwd=None, **kwargs):
+                return {"output": "", "returncode": 0}
+
+        ops = ShellFileOperations(_Undeclared(), cwd=str(tmp_path))
+        outside = tmp_path / "other" / "file.txt"
+        outside.parent.mkdir()
+        monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(safe_root))
+
+        res = ops.write_file(str(outside), "content")
+        assert res.error is not None
+        assert "outside HERMES_WRITE_SAFE_ROOT" in res.error
+
+    def test_helper_reads_the_flag(self, ops):
+        assert ops._write_targets_host() is False
+        ops.env.is_local = True
+        assert ops._write_targets_host() is True
+
+    def test_classifier_default_is_host_scoped(self, tmp_path: Path, monkeypatch):
+        """``host_paths`` defaults to True, so every other caller is unchanged."""
+        from agent.file_safety import get_write_denied_error, is_write_denied
+
+        outside = tmp_path / "elsewhere.txt"
+        monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(tmp_path / "workspace"))
+        assert is_write_denied(str(outside)) is True
+        assert get_write_denied_error(str(outside)) is not None
+        assert is_write_denied(str(outside), host_paths=False) is False
+        assert get_write_denied_error(str(outside), host_paths=False) is None
+
+    def test_credential_denylist_ignores_host_paths_flag(self, monkeypatch, tmp_path: Path):
+        from agent.file_safety import get_write_denied_error
+
+        monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(tmp_path / "workspace"))
+        err = get_write_denied_error("/etc/shadow", host_paths=False)
+        assert err is not None
+        assert "protected system/credential file" in err
+
+    def test_entry_level_ops_respect_the_flag(self, tmp_path: Path, monkeypatch):
+        """delete/move vet the directory entry too — both passes carry the flag."""
+        from agent.file_safety import get_write_denied_error
+
+        monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(tmp_path / "workspace"))
+        outside = tmp_path / "other" / "file.txt"
+        assert get_write_denied_error(str(outside), verb="Delete", entry=True) is not None
+        assert get_write_denied_error(str(outside), verb="Delete", entry=True,
+                                      host_paths=False) is None
+
+
 class TestCheckSensitivePathMacOSBypass:
     """Verify _check_sensitive_path blocks /private/etc paths (issue #8734)."""
 

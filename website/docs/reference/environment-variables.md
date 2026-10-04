@@ -871,6 +871,8 @@ When this variable is set, `write_file` and `patch` may only target paths inside
 
 The official Docker image sets `HERMES_WRITE_SAFE_ROOT=/opt/data` alongside `HERMES_HOME=/opt/data` so the agent cannot escape the mounted data volume.
 
+The roots are measured on the machine running Hermes. With a non-local `terminal.backend` (ssh, docker, modal, daytona) the file tools execute on the backend's host instead, so those writes are not checked against this variable — otherwise every remote path would be outside a container directory. The credential-path denylist still applies to remote writes; see [File write safety](../user-guide/security.md#file-write-safety).
+
 **Do not add this to `~/.hermes/.env` unless you intend to sandbox writes.** A common mistake is pointing it at a project directory while expecting the agent to edit `~/.hermes/cron/jobs.json`, `~/.hermes/skills/`, or scripts under a profile — those paths are outside the sandbox and every `write_file`/`patch` to them fails with an `outside HERMES_WRITE_SAFE_ROOT` error.
 
 To allow both a workspace and Hermes state, list both prefixes (order does not matter):
