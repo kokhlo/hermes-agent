@@ -119,8 +119,8 @@ def configured_endpoint_for(provider: Any, config: Any = None) -> str:
         return ""
     cfg = config if isinstance(config, dict) else {}
     model_cfg = cfg.get("model")
-    if _same_config_route(raw, model_cfg) and isinstance(model_cfg, dict):
-        configured = str(model_cfg.get("base_url") or "").strip()
+    if _same_config_route(raw, model_cfg):
+        configured = str((model_cfg or {}).get("base_url") or "").strip()
         if configured:
             return configured
     user_pdef = resolve_user_provider(raw, cfg.get("providers") or {}) or resolve_custom_provider(
@@ -143,8 +143,8 @@ def stale_persisted_endpoint(provider: Any, base_url: Any, config: Any = None) -
     difference keeps its snapshot. Only an endpoint config names today can contradict the row, so a
     provider with no configured endpoint is never touched.
     """
-    if not normalize_route_base_url(base_url):
-        return False
+    # An unwritten or unparseable stored endpoint has no port to compare, so it reads as 0 below and
+    # the snapshot stands — same as a provider config never names.
     stored_port = _explicit_port(base_url)
     configured_port = _explicit_port(configured_endpoint_for(provider, config))
     return bool(stored_port) and bool(configured_port) and stored_port != configured_port
