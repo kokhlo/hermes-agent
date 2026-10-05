@@ -500,15 +500,28 @@ def waiter_command(root: Path | str, envelope: dict) -> str:
 
 
 def _hermes_cli() -> str:
-    """Prefer this install's published launcher, then interpreter/PATH fallbacks.
+    """Prefer ``$HERMES_BIN``, then this install's published launcher, then the
+    interpreter/PATH fallbacks.
 
     A long-lived caller can still run in an older dependency generation. Its
     sibling console script pins that generation, whereas the published launcher
     selects current dependencies at child start. Keep the historical fallbacks
     for external/developer installs that have no published launcher (#93590).
+
+    ``$HERMES_BIN`` outranks both because neither of the paths below can be
+    re-derived from here: a package-manager workspace publishes no launcher
+    beside its own tree, so a delivery started there would resolve the child to
+    a phantom install (#125537, #133325). Same order as
+    ``hermes_cli.kanban_db_dispatch._resolve_hermes_argv``.
     """
-    # Do not select batch shims: cmd.exe reinterprets otherwise literal argv
-    # (for example an ampersand in a query-file path), even with shell=False.
+    from hermes_cli._hermes_bin_env import hermes_bin_from_env
+
+    # The override is already batch-shim-safe: a Windows .cmd/.bat resolves to
+    # None so the published launcher is tried instead of cmd.exe reinterpreted.
+    env_bin = hermes_bin_from_env()
+    if env_bin:
+        return env_bin
+
     name = "hermes.exe" if sys.platform == "win32" else "hermes"
     published = Path(__file__).resolve().parents[1] / ".hermes" / "bin" / name
     if published.is_file():

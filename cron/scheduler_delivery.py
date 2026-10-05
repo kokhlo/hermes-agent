@@ -873,22 +873,32 @@ def _deliver_to_bot_chat(job: dict, content: str, profile: str, *, deferred: Opt
         # Discovery/admission uncertainty must never open a second-writer fallback.
         return f"bot-chat delivery to profile '{profile_label}' unverified: {exc}"
 
-    # The running install first (same trust order as gateway.run._resolve_hermes_bin): the
-    # scheduler lives in the long-running gateway, so a PATH-first lookup would hand delivery
-    # to whatever `hermes` PATH names — another install, or a planted one — instead of this one.
-    try:
-        import importlib.util as _ilu
-        found = _ilu.find_spec("hermes_cli") is not None
-    except Exception:
-        found = False
-    if found:
-        argv = [sys.executable, "-m", "hermes_cli.main"]
+    # $HERMES_BIN first: neither the running interpreter's tree nor PATH names
+    # this install when the scheduler serves from a package-manager workspace
+    # (`installs/<key>/environments/<gen>/workspace` publishes no launcher), so
+    # the delivery child would re-execute that workspace as its root and land in
+    # a phantom install (#125537, #133325). Then the running install — PATH stays
+    # last, or a PATH-first lookup would hand delivery to whatever `hermes` PATH
+    # names: another install, or a planted one.
+    from hermes_cli._hermes_bin_env import hermes_bin_from_env
+
+    env_bin = hermes_bin_from_env()
+    if env_bin:
+        argv = [env_bin]
     else:
-        hermes_bin = shutil.which("hermes")
-        if not hermes_bin:
-            return ("Hermes could not deliver this result to Bot Chat: the `hermes` command was not found. "
-                    "The result is saved; run `hermes cron runs` to see it, or `hermes doctor` if this keeps happening")
-        argv = [hermes_bin]
+        try:
+            import importlib.util as _ilu
+            found = _ilu.find_spec("hermes_cli") is not None
+        except Exception:
+            found = False
+        if found:
+            argv = [sys.executable, "-m", "hermes_cli.main"]
+        else:
+            hermes_bin = shutil.which("hermes")
+            if not hermes_bin:
+                return ("Hermes could not deliver this result to Bot Chat: the `hermes` command was not found. "
+                        "The result is saved; run `hermes cron runs` to see it, or `hermes doctor` if this keeps happening")
+            argv = [hermes_bin]
 
     def _fail(msg: str, **log_kwargs) -> str:
         logger.warning("Job '%s': %s", job_id, msg, **log_kwargs)
