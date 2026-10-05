@@ -347,7 +347,12 @@ def _cmd_gc(args: argparse.Namespace) -> int:
     if event_days:
         with kbc.connect_closing() as conn:
             removed_events = kb.gc_events(conn, older_than_seconds=event_days * 24 * 3600)
-    removed_logs = kb.gc_worker_logs(older_than_seconds=log_days * 24 * 3600) if log_days else 0
+    removed_logs = 0
+    if log_days:
+        with kbc.connect_closing() as conn:
+            removed_logs = kb.gc_worker_logs(
+                older_than_seconds=log_days * 24 * 3600, conn=conn
+            )
     print(f"GC complete: {removed_ws} workspace(s), "
           f"{removed_events} event row(s), {removed_logs} log file(s) removed")
     return 0

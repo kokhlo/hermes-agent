@@ -15,6 +15,7 @@ locks). Schema: tasks, task_links, task_comments, task_events, task_runs, attach
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -1150,6 +1151,33 @@ CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, start
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
+
+-- First-party record of what a retention sweep deleted. A prune that leaves
+-- no trace is indistinguishable from an unexplained deletion: an append-only
+-- hash chain over task_events, an event-tail consumer or a compliance export
+-- cannot tell one from the other without reconciling by hand against the
+-- retention policy. One row per sweep, written in the same transaction as the
+-- DELETE, so an auditor can check that every missing event id falls inside a
+-- recorded window and matches the sweep's predicate.
+--
+-- The evidence cannot live in task_events itself: a witness row written there
+-- carries the same shape as the rows it documents (a done/archived task_id, a
+-- kind the predicate does not exempt, a created_at that ages past the next
+-- cutoff), so the following sweep would delete the witness and the trail would
+-- be empty again. Hence its own table, which no sweep targets.
+CREATE TABLE IF NOT EXISTS gc_runs (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_at         INTEGER NOT NULL,
+    cutoff         INTEGER NOT NULL,
+    retention_seconds INTEGER NOT NULL,
+    deleted_count  INTEGER NOT NULL,
+    min_event_id   INTEGER,
+    max_event_id   INTEGER,
+    task_ids       TEXT,
+    deleted_ids_digest TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_gc_runs_run_at ON gc_runs(run_at);
 """
 
 
@@ -4372,21 +4400,105 @@ def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3
 
     ``older_than_seconds=0`` means everything older than now; the CLI maps
     ``--event-retention-days 0`` to "disabled" before calling this.
+
+    Every sweep leaves a row in ``gc_runs`` naming its cutoff, retention and
+    the exact ids it removed, so a later audit can tell this prune apart from a
+    deletion nobody recorded. The record is written inside the same transaction
+    as the DELETE: a rollback that loses the delete must not leave a claim that
+    rows are missing, and a sweep that found nothing still records that it ran.
     """
-    cutoff = int(time.time()) - _retention_seconds(older_than_seconds)
+    retention = _retention_seconds(older_than_seconds)
+    cutoff = int(time.time()) - retention
     with write_txn(conn):
+        doomed = conn.execute(
+            "SELECT id, task_id FROM task_events WHERE created_at < ? AND kind != 'decomposed' "
+            "AND task_id IN (SELECT id FROM tasks WHERE status IN ('done', 'archived')) "
+            "ORDER BY id",
+            (cutoff,),
+        ).fetchall()
         cur = conn.execute(
             "DELETE FROM task_events WHERE created_at < ? AND kind != 'decomposed' AND task_id IN "
             "(SELECT id FROM tasks WHERE status IN ('done', 'archived'))", (cutoff,),
         )
-    return int(cur.rowcount or 0)
+        deleted = int(cur.rowcount or 0)
+        _record_gc_run(
+            conn,
+            cutoff=cutoff,
+            retention_seconds=retention,
+            deleted_count=deleted,
+            deleted_event_ids=[row["id"] for row in doomed],
+            task_ids=sorted({row["task_id"] for row in doomed}),
+        )
+    return deleted
 
 
-def gc_worker_logs(*, older_than_seconds: int = 30 * 24 * 3600, board: Optional[str] = None) -> int:
+def _record_gc_run(
+    conn: sqlite3.Connection,
+    *,
+    cutoff: int,
+    retention_seconds: int,
+    deleted_count: int,
+    deleted_event_ids: Optional[Iterable[int]] = None,
+    task_ids: Optional[Iterable[str]] = None,
+) -> None:
+    """Write one ``gc_runs`` row describing a sweep that just happened.
+
+    ``task_ids`` is stored as JSON (the cards whose histories the sweep took
+    with it) and ``deleted_ids_digest`` as a sha256 over the sorted deleted id
+    list: an auditor can recompute the digest from an export to confirm the
+    recorded range is the whole set, without this table growing one column per
+    swept row. Both are NULL for the file sweep, which has no event ids.
+    """
+    ids = sorted(int(i) for i in deleted_event_ids or ())
+    digest = (
+        hashlib.sha256(",".join(str(i) for i in ids).encode("utf-8")).hexdigest() if ids else None
+    )
+    cards = sorted({str(t) for t in task_ids or ()})
+    conn.execute(
+        "INSERT INTO gc_runs (run_at, cutoff, retention_seconds, deleted_count, min_event_id, "
+        "max_event_id, task_ids, deleted_ids_digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            int(time.time()),
+            int(cutoff),
+            int(retention_seconds),
+            int(deleted_count),
+            ids[0] if ids else None,
+            ids[-1] if ids else None,
+            json.dumps(cards) if cards else None,
+            digest,
+        ),
+    )
+
+
+def list_gc_runs(conn: sqlite3.Connection, *, limit: int = 20) -> list[dict]:
+    """Most recent ``gc_runs`` records, newest first, for audit and support."""
+    rows = conn.execute(
+        "SELECT * FROM gc_runs ORDER BY id DESC LIMIT ?", (max(1, int(limit)),)
+    ).fetchall()
+    out: list[dict] = []
+    for row in rows:
+        record = {key: row[key] for key in row.keys()}
+        raw = record.get("task_ids")
+        record["task_ids"] = json.loads(raw) if raw else []
+        out.append(record)
+    return out
+
+
+def gc_worker_logs(
+    *, older_than_seconds: int = 30 * 24 * 3600, board: Optional[str] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> int:
     """Delete worker log files older than the cutoff on one board; returns the count.
 
     ``older_than_seconds=0`` means everything older than now; the CLI maps
     ``--log-retention-days 0`` to "disabled" before calling this.
+
+    Pass ``conn`` to leave a ``gc_runs`` record naming the log files this sweep
+    removed, so a missing log is distinguishable from one that was never
+    written. The record is written after the unlinks rather than alongside
+    them: a file unlink is not transactional, so an interrupted sweep can
+    remove files without recording them, but it must never record files it did
+    not remove.
     """
     older_than_seconds = _retention_seconds(older_than_seconds)
     log_dir = worker_logs_dir(board=board)
@@ -4394,11 +4506,22 @@ def gc_worker_logs(*, older_than_seconds: int = 30 * 24 * 3600, board: Optional[
         return 0
     cutoff = time.time() - older_than_seconds
     removed = 0
+    removed_names: list[str] = []
     for p in log_dir.iterdir():
         with contextlib.suppress(OSError):
             if p.is_file() and p.stat().st_mtime < cutoff:
                 p.unlink()
                 removed += 1
+                removed_names.append(p.name)
+    if conn is not None:
+        with write_txn(conn):
+            _record_gc_run(
+                conn,
+                cutoff=int(cutoff),
+                retention_seconds=older_than_seconds,
+                deleted_count=removed,
+                task_ids=[n[:-4] if n.endswith(".log") else n for n in removed_names],
+            )
     return removed
 
 
