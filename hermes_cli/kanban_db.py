@@ -4395,6 +4395,16 @@ def _retention_seconds(older_than_seconds: int) -> int:
     return older_than_seconds
 
 
+# What ``gc_events`` prunes, as one predicate so the sweep's evidence describes
+# exactly the rows the DELETE takes. ``decomposed`` survives until task deletion
+# because it is the child's parent link; everything else on a finished card ages
+# out. The single positional placeholder is the cutoff.
+_GC_EVENT_PREDICATE = (
+    "created_at < ? AND kind != 'decomposed' AND task_id IN "
+    "(SELECT id FROM tasks WHERE status IN ('done', 'archived'))"
+)
+
+
 def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3600) -> int:
     """Prune old done/archived events, retaining decomposition identity until task deletion.
 
@@ -4410,26 +4420,22 @@ def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3
     retention = _retention_seconds(older_than_seconds)
     cutoff = int(time.time()) - retention
     with write_txn(conn):
+        # The doomed set is read before the DELETE and inside the same
+        # transaction, so within it the SELECT already sees exactly the rows the
+        # DELETE will take — after the delete they are simply gone.
         doomed = conn.execute(
-            "SELECT id, task_id FROM task_events WHERE created_at < ? AND kind != 'decomposed' "
-            "AND task_id IN (SELECT id FROM tasks WHERE status IN ('done', 'archived')) "
-            "ORDER BY id",
-            (cutoff,),
+            f"SELECT id, task_id FROM task_events WHERE {_GC_EVENT_PREDICATE} ORDER BY id", (cutoff,)
         ).fetchall()
-        cur = conn.execute(
-            "DELETE FROM task_events WHERE created_at < ? AND kind != 'decomposed' AND task_id IN "
-            "(SELECT id FROM tasks WHERE status IN ('done', 'archived'))", (cutoff,),
-        )
-        deleted = int(cur.rowcount or 0)
+        cur = conn.execute(f"DELETE FROM task_events WHERE {_GC_EVENT_PREDICATE}", (cutoff,))
         _record_gc_run(
             conn,
             cutoff=cutoff,
             retention_seconds=retention,
-            deleted_count=deleted,
+            deleted_count=int(cur.rowcount or 0),
             deleted_event_ids=[row["id"] for row in doomed],
-            task_ids=sorted({row["task_id"] for row in doomed}),
+            task_ids={row["task_id"] for row in doomed},
         )
-    return deleted
+    return int(cur.rowcount or 0)
 
 
 def _record_gc_run(
