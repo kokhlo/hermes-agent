@@ -71,7 +71,16 @@ _PRUNE_NUM_FILTERS = (
     "min_tool_calls", "max_tool_calls")
 
 
-_PRUNE_ROW_KEYS = ("id", "source", "title", "model", "started_at", "last_active", "message_count")
+# Same row ``list_prune_candidates`` projects, so the REST dry-run cannot be narrower than the CLI
+# preview of the same selection: a bound the request filtered on has to be readable on the row it
+# matched. Costs stay split for the same reason as the CLI (the estimate can undercount real
+# tier-priced billing, #109976) — the API consumer labels them, we do not decide for it.
+_PRUNE_ROW_KEYS = (
+    "id", "source", "title", "model", "started_at", "last_active", "ended_at", "archived",
+    "pinned", "message_count", "input_tokens", "output_tokens", "tool_call_count",
+    "actual_cost_usd", "estimated_cost_usd", "billing_provider", "git_branch", "end_reason",
+    "cwd", "user_id", "chat_id", "chat_type",
+)
 
 
 def _prune_sessions(body: SessionPrune):

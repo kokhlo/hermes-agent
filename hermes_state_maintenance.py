@@ -262,12 +262,23 @@ class SessionMaintenanceMixin:
     def list_prune_candidates(self, older_than_days: Optional[float] = None, source: str = None, *,
                               whole_lineages: bool = False, **filters) -> List[Dict[str, Any]]:
         """Dry-run: sessions a matching prune/archive would touch, oldest first (``older_than_days``
-        = inactivity threshold: freshest of ``last_activity_at`` / latest message / ``started_at``)."""
+        = inactivity threshold: freshest of ``last_activity_at`` / latest message / ``started_at``).
+
+        Every dimension ``_PRUNE_FILTERS`` can select on is projected, not just the handful the
+        fixed preview columns show: a caller that filters on a value cannot display it unless the
+        row carries it, and costs/tokens/tool calls are plain ``sessions`` columns, so this is one
+        wider SELECT rather than a join. ``actual_cost_usd`` and ``estimated_cost_usd`` stay
+        separate — the estimate can undercount real tier-priced billing several times over
+        (#109976), and a caller that merges them prints the estimate as billing truth.
+        """
         where, params = self._prune_where(older_than_days, source, filters, whole_lineages=whole_lineages)
         return [dict(row) for row in self._read_all(
             f"""SELECT s.id, s.source, s.title, s.model, s.started_at,
                            {_LAST_ACTIVE_SQL} AS last_active,
-                           s.ended_at, s.message_count, s.archived
+                           s.ended_at, s.message_count, s.archived, s.pinned,
+                           s.input_tokens, s.output_tokens, s.tool_call_count,
+                           s.actual_cost_usd, s.estimated_cost_usd, s.billing_provider,
+                           s.git_branch, s.end_reason, s.cwd, s.user_id, s.chat_id, s.chat_type
                     FROM sessions s WHERE {where}
                     ORDER BY last_active ASC, s.started_at ASC""", params)]
 

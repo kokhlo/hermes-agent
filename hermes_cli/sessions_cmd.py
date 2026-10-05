@@ -691,11 +691,16 @@ def _note_pinned_skipped(db, filters, action):
           f"(pin is a keep flag). {optin}")
 
 
+# Which timestamp the preview's span line describes, per projected column (see preview_time_key).
+_SPAN_NOUN = {"started_at": "start", "last_active": "activity"}
+
+
 def _cmd_prune_or_archive(db, args, action):
     prune = action == "prune"
     if prune and getattr(args, "never_active", False):
         return _prune_never_active_keyed(db, args)
-    from hermes_cli.session_filters import build_prune_filters, describe_filters, format_epoch
+    from hermes_cli.session_filters import (
+        build_prune_filters, describe_filters, format_epoch, preview_columns, preview_time_key)
     # Bare `prune` keeps the historical "older than 90 days" default. ANY filter — including --source —
     # suppresses the implicit cutoff (`prune --source cron` matches ALL cron sessions); the preview +
     # confirmation below is the safety net.
@@ -731,19 +736,29 @@ def _cmd_prune_or_archive(db, args, action):
     if not candidates:
         print(f"No sessions match ({describe_filters(filters)}).")
         return
+    # The row must carry what the filters selected on: an unread bound is a bound taken on trust
+    # right before a destructive confirmation. The timestamp column is labelled by the bound that
+    # produced it — --before/--after filter on started_at, everything else on last activity.
+    time_key = preview_time_key(filters)
+    columns = preview_columns(filters)
     # Candidates are oldest-activity-first; show the span so a long-lived but recently used
     # conversation cannot look old merely by creation date.
     _span = (
-        f"oldest activity {format_epoch(candidates[0].get('last_active'))}, "
-        f"newest activity {format_epoch(candidates[-1].get('last_active'))}"
+        f"oldest {_SPAN_NOUN[time_key]} {format_epoch(candidates[0].get(time_key))}, "
+        f"newest {_SPAN_NOUN[time_key]} {format_epoch(candidates[-1].get(time_key))}"
     )
+    time_header = "Started" if time_key == "started_at" else "Last Active"
     if args.dry_run or not args.yes:
         shown = candidates if args.dry_run else candidates[:15]
         print(f"{len(candidates)} session(s) match ({describe_filters(filters)}; {_span}):")
+        print(f"  {'ID':<24} {time_header:<17} {'Source':<10} {'Model':<24} {'Msgs':>4}"
+              + "".join(f" {header:<14}" for header, _ in columns) + "  Title")
         for s in shown:
             model = (s.get("model") or "-").split("/")[-1][:24]
-            print(f"  {s['id']}  {format_epoch(s.get('last_active')):<17} {s['source']:<10} {model:<24} "
-                  f"{s['message_count']:>4} msgs  {(s.get('title') or '')[:36]}")
+            print(f"  {s['id']:<24} {format_epoch(s.get(time_key)):<17} {(s.get('source') or '-'):<10} "
+                  f"{model:<24} {s['message_count']:>4}"
+                  + "".join(f" {value(s):<14}" for _, value in columns)
+                  + f"  {(s.get('title') or '')[:36]}")
         if len(candidates) > len(shown):
             print_truncated(len(candidates) - len(shown))
         if args.dry_run:

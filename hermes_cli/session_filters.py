@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from hermes_cli.timefmt import coerce_epoch
 
@@ -116,6 +116,12 @@ def build_prune_filters(args: Any) -> Dict[str, Any]:
     return {"older_than_days": None, **bounds, **{key: getattr(args, attr, None) for key, attr, _ in _ARG_FILTERS}}
 
 
+def _filter_is_set(filters: Dict[str, Any], key: str) -> bool:
+    """Is the filter *key* in play? Numeric bounds count 0 as a real bound; text filters need a value."""
+    value = filters.get(key)
+    return value is not None if key.startswith(("min_", "max_")) else bool(value)
+
+
 def describe_filters(filters: Dict[str, Any]) -> str:
     """Human-readable summary of active filters for confirmation prompts."""
     parts = [
@@ -123,6 +129,73 @@ def describe_filters(filters: Dict[str, Any]) -> str:
         if filters.get(key) is not None
     ] + [
         template.format(v=filters[key]) for key, _, template in _ARG_FILTERS
-        if ((filters.get(key) is not None) if key.startswith(("min_", "max_")) else bool(filters.get(key)))
+        if _filter_is_set(filters, key)
     ]
     return ", ".join(parts) if parts else "no filters (all ended sessions)"
+
+
+# -- preview projection ------------------------------------------------------
+# A preview row must carry the value a filter selected on: a bound you cannot read back is a
+# bound you have to take on trust, right before a destructive confirmation.
+_PREVIEW_VALUE_WIDTH = 14
+
+
+def _clip(value: Any) -> str:
+    text = str(value) if value not in (None, "") else "-"
+    return text[:_PREVIEW_VALUE_WIDTH]
+
+
+def _cell(key: str) -> Callable[[Dict[str, Any]], str]:
+    return lambda row: _clip(row.get(key))
+
+
+def _cost_cell(row: Dict[str, Any]) -> str:
+    """Cost as billed when the row carries one, else as estimated — always labelled, because the
+    estimate can undercount real tier-priced billing several times over (#109976), so a bare
+    figure reads as the amount charged."""
+    if (actual := row.get("actual_cost_usd")) is not None:
+        return f"${actual:.4f} actual"
+    if (estimated := row.get("estimated_cost_usd")) is not None:
+        return f"${estimated:.4f} est."
+    return "$0.0000 est."
+
+
+def _tokens_cell(row: Dict[str, Any]) -> str:
+    return f"{(row.get('input_tokens') or 0) + (row.get('output_tokens') or 0):,}"
+
+
+def _calls_cell(row: Dict[str, Any]) -> str:
+    return f"{row.get('tool_call_count') or 0:,}"
+
+
+# (filter keys, preview header, value renderer) in print order.
+_PREVIEW_COLUMNS = (
+    (("min_cost", "max_cost"), "Cost", _cost_cell),
+    (("min_tokens", "max_tokens"), "Tokens", _tokens_cell),
+    (("min_tool_calls", "max_tool_calls"), "Calls", _calls_cell),
+    (("end_reason",), "End reason", _cell("end_reason")),
+    (("provider",), "Provider", _cell("billing_provider")),
+    (("branch_like",), "Branch", _cell("git_branch")),
+    (("cwd_prefix",), "Cwd", _cell("cwd")),
+    (("user_id",), "User", _cell("user_id")),
+    (("chat_id",), "Chat", _cell("chat_id")),
+    (("chat_type",), "Chat type", _cell("chat_type")),
+)
+
+
+def preview_columns(filters: Dict[str, Any]) -> List[Tuple[str, Callable[[Dict[str, Any]], str]]]:
+    """``(header, value)`` columns the *active* filters earn, in a stable print order. Dimensions no
+    active filter selects on stay off the row, so an unfiltered preview keeps its current shape."""
+    return [
+        (header, render) for keys, header, render in _PREVIEW_COLUMNS
+        if any(_filter_is_set(filters, key) for key in keys)
+    ]
+
+
+def preview_time_key(filters: Dict[str, Any]) -> str:
+    """Row timestamp the preview shows: the value the active bounds actually filtered on.
+    ``--before`` / ``--after`` bound ``started_at``, so rendering last activity there displayed a
+    date the filter never looked at."""
+    if any(_filter_is_set(filters, key) for key in ("started_before", "started_after")):
+        return "started_at"
+    return "last_active"
