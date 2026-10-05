@@ -14,6 +14,7 @@ directory.
 """
 
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -82,29 +83,43 @@ def test_current_directory_is_never_searched(tmp_path, monkeypatch):
     assert env_bin.hermes_bin_from_env() is None
 
 
+def _executable(directory, name):
+    """An executable candidate: the Windows branch filters on ``os.X_OK``, which
+    ``Path.touch()`` does not set — real launchers ship the bit, so the fixture
+    must too."""
+    path = directory / name
+    path.touch()
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    return path
+
+
 @pytest.mark.platforms("windows")
 def test_batch_shim_override_is_refused(tmp_path, monkeypatch):
     """``cmd.exe`` reinterprets an otherwise literal argv — a ``.cmd``/``.bat``
     override must not become the child's entry point."""
     monkeypatch.setattr(env_bin, "_is_windows", lambda: True)
-    shim = tmp_path / "hermes.cmd"
-    shim.touch()
-    monkeypatch.setenv("HERMES_BIN", str(shim))
+    monkeypatch.setenv("HERMES_BIN", str(_executable(tmp_path, "hermes.cmd")))
     assert env_bin.hermes_bin_from_env() is None
 
 
 @pytest.mark.platforms("windows")
-def test_batch_shim_is_refused_even_when_found_on_path(tmp_path, monkeypatch):
+def test_batch_shim_is_refused_when_path_resolves_only_to_one(tmp_path, monkeypatch):
+    """A PATH whose only candidate is a shim resolves to nothing usable, so the
+    caller keeps its own launcher instead of exec'ing through ``cmd.exe``.
+
+    The name is looked up as ``command + PATHEXT`` suffix, and Windows' default
+    order is ``.COM;.EXE;.BAT;.CMD`` — a real .exe is reached first. Only the
+    refusal is under test here, so the fixture offers a single candidate and
+    depends on neither that ordering nor the filesystem's case sensitivity.
+    """
     bindir = tmp_path / "published"
     bindir.mkdir()
-    (bindir / "hermes.cmd").touch()
-    (bindir / "hermes.exe").touch()
+    _executable(bindir, "hermes.cmd")
     monkeypatch.setattr(env_bin, "_is_windows", lambda: True)
     monkeypatch.setenv("HERMES_BIN", "hermes")
-    monkeypatch.setenv("PATHEXT", ".EXE;.CMD")
+    monkeypatch.setenv("PATHEXT", ".cmd")
     monkeypatch.setenv("PATH", str(bindir))
-    # PATHEXT order picks the .exe; the .cmd must never be the fallback.
-    assert env_bin.hermes_bin_from_env() == str(bindir / "hermes.exe")
+    assert env_bin.hermes_bin_from_env() is None
 
 
 # ── parity with the dispatcher, which established the order ──────────────────
