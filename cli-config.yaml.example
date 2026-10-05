@@ -1866,6 +1866,26 @@ display:
   # edit-in-place "⏳ Working — N min" heartbeat). Override under
   # display.platforms.telegram.
 
+  # Terminal-only showcase colors for streamed/buffered thinking text (the
+  # CLI's [thinking] preview and live reasoning box). Defaults: Homebrew-green
+  # prose, orange order marks ("1." "2.") and "-" bullets before shell
+  # commands, white § log marks, #PR numbers and URLs. #RRGGBB hex; an invalid
+  # or missing value falls back to its default.
+  # Change with `hermes config set display.thinking_colors.<key> '#RRGGBB'`:
+  #   hermes config set display.thinking_colors.main '#28FE14'   # prose
+  #   hermes config set display.thinking_colors.order '#FF9F0A'  # 1. 2. 3.
+  #   hermes config set display.thinking_colors.cmd '#FF9F0A'    # - git, - hermes
+  #   hermes config set display.thinking_colors.log '#FFFFFF'    # §[2026-10-02]
+  #   hermes config set display.thinking_colors.pr '#FFFFFF'     # #123456
+  #   hermes config set display.thinking_colors.url '#FFFFFF'    # https://…
+  # thinking_colors:
+  #   main: "#28FE14"
+  #   order: "#FF9F0A"
+  #   cmd: "#FF9F0A"
+  #   log: "#FFFFFF"
+  #   pr: "#FFFFFF"
+  #   url: "#FFFFFF"
+
   # Auto-cleanup of temporary progress bubbles after the final response lands.
   # On platforms that support message deletion (currently Telegram), this
   # removes the tool-progress bubble, "⏳ Still working..." notices, and

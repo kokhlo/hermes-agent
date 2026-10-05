@@ -900,6 +900,19 @@ DEFAULT_CONFIG = {
         "focus_view": False,
         "focus_saved_tool_progress": "all",
         "skin": "default",
+        # CLI-only showcase colors for streamed/buffered thinking text: main prose, order
+        # marks ("1." "2."), "-" bullets before shell commands, § log marks, #PR numbers,
+        # and URLs. #RRGGBB hex; an invalid or missing per-key value falls back to its
+        # default. Terminal-only: the desktop renders its own thinking styling. Change with
+        # e.g. `hermes config set display.thinking_colors.main '#FF0000'`.
+        "thinking_colors": {
+            "main": "#28FE14",   # Homebrew-terminal green (macOS Terminal "Homebrew" profile TextColor)
+            "order": "#FF9F0A",  # orange
+            "cmd": "#FF9F0A",    # orange ("- git", "- hermes" list bullets)
+            "log": "#FFFFFF",    # §[2026-10-02] log marks
+            "pr": "#FFFFFF",     # #123456 (6+ digit PR numbers)
+            "url": "#FFFFFF",    # https://… (matched through the #fragment)
+        },
         # UI language for static messages (approval prompts, some gateway slash replies); not agent
         # responses/logs/tool outputs. en, zh, ja, de, es, fr, tr, uk; unknown → en.
         "language": "en",

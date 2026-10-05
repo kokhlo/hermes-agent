@@ -2197,6 +2197,14 @@ display:
   # protocol advertised), a warp://cli-agent OSC 777 event (`stop` on completion, `permission_request` on
   # blocking prompts) so Warp's tab status and notification mailbox track Hermes. No extra keys needed.
   show_reasoning: true    # Show model reasoning/thinking above each response (default: true; toggle with /reasoning show|hide)
+  # CLI-only: showcase colors for streamed/buffered thinking text (see "Thinking showcase colors" below)
+  thinking_colors:
+    main: "#28FE14"       # prose (Homebrew-terminal green)
+    order: "#FF9F0A"      # list order marks ("1." "2.")
+    cmd: "#FF9F0A"        # "-" bullets before shell commands
+    log: "#FFFFFF"        # §[2026-10-02] log marks
+    pr: "#FFFFFF"         # #123456 PR numbers (6+ digits)
+    url: "#FFFFFF"        # https://… (matched through the #fragment)
   streaming: false        # Stream tokens to terminal as they arrive (real-time output)
   show_cost: false        # Show estimated $ cost in the CLI status bar
   vim_mode: false         # CLI only: vi/vim keybindings in the input composer (Esc → NORMAL, i → INSERT). The live NORMAL/INSERT/REPLACE mode shows at the right of the status bar. Config-only, read at startup.
@@ -2214,6 +2222,19 @@ display:
   credits_notices: true   # Nous credits status-bar notices (usage bands, grant-spent, depleted). false = silence them; /usage still works
   cli_rebuild_scrollback_on_redraw: false  # Classic CLI: also wipe terminal scrollback (CSI 3J) on /redraw / Ctrl+L / width-change resize recovery. Enable when a terminal/tmux stack stamps stale prompt chrome into scrollback on maximize/restore.
   language: en            # UI language for static messages (approval prompts, some gateway replies). en | zh | zh-hant | ja | de | es | fr | tr | uk | af | ko | it | ga | pt | ru | hu
+```
+
+### Thinking showcase colors
+
+The CLI renders streamed/buffered thinking text — the buffered `[thinking]` preview and the live reasoning box — as a colored "showcase": prose in the main color, with list order marks (`1.` `2.`), `-` list bullets before shell commands (`- git`, `- hermes`), `§[...]` log marks, `#123456` PR numbers, and URLs each in their own color. The palette is configurable per class via `display.thinking_colors` (hex `#RRGGBB`); invalid or missing values fall back per key to the defaults above, so rendering never breaks on a bad value. The final assistant answer, the `[thinking]` label, and the box borders are unchanged, and this is terminal-only — the desktop app renders its own thinking styling.
+
+```bash
+hermes config set display.thinking_colors.main '#FF0000'   # prose
+hermes config set display.thinking_colors.order '#FF9F0A'  # 1. 2. 3.
+hermes config set display.thinking_colors.cmd '#FF9F0A'    # - git, - hermes
+hermes config set display.thinking_colors.log '#FFFFFF'    # §[2026-10-02]
+hermes config set display.thinking_colors.pr '#FFFFFF'     # #123456
+hermes config set display.thinking_colors.url '#FFFFFF'    # https://…
 ```
 
 ### Per-turn summary and spinner token flow

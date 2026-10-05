@@ -213,6 +213,13 @@ def _cli_config_defaults():
             "cli_rebuild_scrollback_on_redraw": False,
             "persist_prompts": True,  # one-line summary of resolved modal prompts into scrollback
             "skin": "default",
+            # Keep in sync with hermes_cli/config_defaults.py DEFAULT_CONFIG (thinking_colors):
+            # showcase palette for the CLI's streamed/buffered thinking text, overridable per
+            # key via `hermes config set display.thinking_colors.<key> '#RRGGBB'`.
+            "thinking_colors": {
+                "main": "#28FE14", "order": "#FF9F0A", "cmd": "#FF9F0A",
+                "log": "#FFFFFF", "pr": "#FFFFFF", "url": "#FFFFFF",
+            },
         },
         "code_execution": {"timeout": 300, "max_tool_calls": 50},
         "auxiliary": {"vision": {"provider": "auto", "model": "", "base_url": "", "api_key": ""}},
