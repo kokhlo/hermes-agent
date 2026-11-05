@@ -30,7 +30,10 @@ from agent.credential_pool import (
     credential_pool_matches_provider, resolve_runtime_pool_key,
 )
 from agent.error_classifier import FailoverReason
-from agent.retry_utils import parse_retry_after_seconds, reset_delay_from_message
+from agent.retry_utils import reset_delay_from_message
+from agent.agent_runtime_helpers_reset_headers import (
+    _set_reset_from_retry_after, _set_reset_from_unified_headers, _set_reset_from_vendor_headers,
+)
 from agent.message_metadata import MERGED_TURN_PREFIX
 from agent.turn_context import drop_stale_api_content
 from agent.agent_runtime_helpers_placeholders import _INTERRUPTED_PLACEHOLDER
@@ -3649,94 +3652,6 @@ def _iter_pool_sockets(client: Any):
                 if sock is not None and id(sock) not in seen:
                     seen.add(id(sock))
                     yield sock
-
-
-def _set_reset_from_retry_after(context: dict[str, Any], retry_after: Any) -> None:
-    if "reset_at" in context:
-        return
-    seconds = parse_retry_after_seconds(retry_after)
-    if seconds is not None:
-        context["reset_at"] = time.time() + seconds
-
-
-# OpenAI-style relative windows: "6m0s", "1.5s", "20ms", "1h2m3s" (also a bare number of seconds).
-_DURATION_COMPONENT_RE = re.compile(r"(\d+(?:\.\d+)?)(ms|h|m|s)")
-_DURATION_UNIT_SECONDS = {"h": 3600.0, "m": 60.0, "s": 1.0, "ms": 0.001}
-# Lowest-priority reset sources, after Retry-After and x-ratelimit-reset: OpenAI's per-bucket
-# durations and Anthropic's per-bucket ISO-8601 timestamps. Plain OpenAI/Anthropic 429s often
-# carry only these, and without them the retry status never names the reset window.
-_VENDOR_RESET_HEADERS = (
-    "x-ratelimit-reset-requests", "x-ratelimit-reset-tokens",
-    "anthropic-ratelimit-requests-reset", "anthropic-ratelimit-tokens-reset",
-)
-# Anthropic's unified headers describe the account-level 5h/7d windows and whether they are
-# actually blocking the account. They rank below every other reset source, and only the
-# unified-status carries their meaning: the resets of an "allowed" window are not binding.
-_UNIFIED_STATUS_HEADER = "anthropic-ratelimit-unified-status"
-_UNIFIED_RESET_HEADERS = ("anthropic-ratelimit-unified-5h-reset", "anthropic-ratelimit-unified-7d-reset")
-
-
-def _duration_string_seconds(text: str) -> Optional[float]:
-    raw = text.strip().lower()
-    if not raw:
-        return None
-    try:
-        return float(raw)
-    except ValueError:
-        pass
-    parts = _DURATION_COMPONENT_RE.findall(raw)
-    if not parts or "".join(n + u for n, u in parts) != raw:
-        return None
-    return sum(float(n) * _DURATION_UNIT_SECONDS[u] for n, u in parts)
-
-
-def _header_reset_seconds(value: str) -> Optional[float]:
-    """Seconds until a vendor reset header's instant, or None when absent/past/unparseable."""
-    seconds = _duration_string_seconds(value)
-    if seconds is None:
-        absolute = _parse_absolute_timestamp(value)
-        seconds = None if absolute is None else absolute - time.time()
-    return seconds if seconds is not None and seconds > 0 else None
-
-
-def _set_reset_from_vendor_headers(context: dict[str, Any], headers: Any) -> None:
-    for name in _VENDOR_RESET_HEADERS:
-        value = headers.get(name)
-        if not isinstance(value, str) or not value.strip():
-            continue
-        seconds = _header_reset_seconds(value)
-        if seconds is not None:
-            context["reset_at"] = time.time() + seconds
-            return
-
-
-def _set_reset_from_unified_headers(context: dict[str, Any], headers: Any) -> None:
-    """Read Anthropic's account-level 5h/7d windows.
-
-    Two separate jobs. The status flag is read whatever else the response said: a 429 body
-    claiming the *request* would exceed the account's limit arrives even while the unified
-    windows stand open — a 1-token probe of such an account succeeds within seconds
-    (#131360), so the pool must hear "window open" even when a bucket header named a window.
-
-    The resets are adopted only when the status says ``blocked`` and nothing more specific
-    (retry-after, a body window, a per-bucket reset) already named one. Of the two, the
-    earliest future instant wins: over-benching idles an account that has a window back,
-    while a too-short bench just re-fails once and re-benches.
-    """
-    status = headers.get(_UNIFIED_STATUS_HEADER)
-    normalized_status = status.strip().lower() if isinstance(status, str) else ""
-    if normalized_status == "allowed":
-        context["account_window_open"] = True
-    if normalized_status != "blocked" or "reset_at" in context:
-        return
-    resets = [
-        seconds
-        for name in _UNIFIED_RESET_HEADERS
-        if isinstance(headers.get(name), str) and headers[name].strip()
-        and (seconds := _header_reset_seconds(headers[name])) is not None
-    ]
-    if resets:
-        context["reset_at"] = time.time() + min(resets)
 
 
 def extract_api_error_context(error: Exception) -> dict[str, Any]:

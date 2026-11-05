@@ -254,6 +254,32 @@ def test_open_window_four_twenty_nine_keeps_the_account_briefly_benched_only(mon
     )
 
 
+def test_rejected_account_four_twenty_nine_benches_until_the_account_reset(monkeypatch):
+    """The spent-account headers Anthropic sent on 2026-11-04 (#131360), minus retry-after:
+    unified-status ``rejected``, epoch-second resets, the 7d window binding while the 5h one
+    is open. The bench is the account's reset instant, not the open 5h window nor the hour.
+    """
+    monkeypatch.setattr(time, "time", lambda: 1793825335.0)  # 2026-11-04T20:48:55Z
+    pool = _pool_entry()
+    monkeypatch.setattr(ac, "load_pool", lambda _provider: pool)
+    monkeypatch.setattr(ac, "_evict_cached_clients", lambda _provider: None)
+
+    headers = {
+        "anthropic-ratelimit-unified-status": "rejected",
+        "anthropic-ratelimit-unified-reset": "1794164400",  # 2026-11-08T19:00:00Z
+        "anthropic-ratelimit-unified-5h-status": "allowed",
+        "anthropic-ratelimit-unified-5h-reset": "1793842800",  # 2026-11-05T01:40:00Z
+        "anthropic-ratelimit-unified-7d-status": "rejected",
+        "anthropic-ratelimit-unified-7d-reset": "1794164400",
+    }
+    exc = _err(429, _ANTHROPIC_ACCOUNT_BODY, headers=headers)
+    assert ac._recover_provider_pool("anthropic", exc, failed_api_key="sk-primary") is True
+
+    benched = next(e for e in pool.entries() if e.id == "pref0000")
+    assert benched.last_status == "exhausted"
+    assert benched.last_error_reset_at == pytest.approx(1794164400, abs=0.5)
+
+
 def _iso_later(seconds):
     from datetime import UTC, datetime, timedelta
 

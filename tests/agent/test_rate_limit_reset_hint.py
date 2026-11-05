@@ -76,6 +76,7 @@ def test_live_wait_line_names_the_reset_window_too():
     ({"x-ratelimit-reset-requests": "6m0s"}, 360),
     ({"x-ratelimit-reset-tokens": "1.5s"}, 1.5),
     ({"x-ratelimit-reset-requests": "20ms"}, 0.02),
+    ({"x-ratelimit-reset-requests": "30"}, 30),  # a bare vendor number stays a duration
     ({"anthropic-ratelimit-requests-reset": None}, 900),  # filled below with now+900 ISO-8601 'Z'
     ({"retry-after": "30", "x-ratelimit-reset-requests": "6m0s"}, 30),  # Retry-After still wins
 ])
@@ -135,3 +136,50 @@ def test_unified_reset_headers_feed_reset_at_only_when_the_account_is_blocked():
     # Retry-After outranks the unified pair, same as it outranks every other header.
     with_retry_after = _account_429({**_unified_headers("blocked", 600), "retry-after": "30"})
     assert abs(extract_api_error_context(with_retry_after)["reset_at"] - (time.time() + 30)) < 5
+
+
+# An account-level 429 as Anthropic sent it on 2026-11-04 20:48:55 UTC (#131360): the status
+# is "rejected", the resets are epoch seconds, and the 7d window binds while the 5h one is open.
+_PROBE_AT = 1793825335.0  # 2026-11-04T20:48:55Z
+_REJECTED_ACCOUNT = {
+    "anthropic-ratelimit-unified-status": "rejected",
+    "anthropic-ratelimit-unified-reset": "1794164400",  # 2026-11-08T19:00:00Z
+    "anthropic-ratelimit-unified-5h-status": "allowed",
+    "anthropic-ratelimit-unified-5h-reset": "1793842800",  # 2026-11-05T01:40:00Z
+    "anthropic-ratelimit-unified-7d-status": "rejected",
+    "anthropic-ratelimit-unified-7d-reset": "1794164400",
+}
+
+
+def test_rejected_account_benches_until_the_unified_reset_instant(monkeypatch):
+    """The account-wide reset is the instant Anthropic names for the whole account, so it
+    wins over the 5h reset, which is earlier but belongs to a window that is still open."""
+    monkeypatch.setattr(time, "time", lambda: _PROBE_AT)
+
+    context = extract_api_error_context(_account_429(dict(_REJECTED_ACCOUNT)))
+    assert context["reset_at"] == pytest.approx(1794164400, abs=0.5)
+    assert "account_window_open" not in context
+
+    # Retry-After still outranks it (339064 s after the probe is 2026-11-08T18:59:59Z).
+    with_retry_after = _account_429({**_REJECTED_ACCOUNT, "retry-after": "339064"})
+    assert extract_api_error_context(with_retry_after)["reset_at"] == pytest.approx(_PROBE_AT + 339064, abs=0.5)
+
+
+def test_without_the_account_reset_the_rejected_window_binds_not_the_earliest(monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: _PROBE_AT)
+    headers = {k: v for k, v in _REJECTED_ACCOUNT.items() if k != "anthropic-ratelimit-unified-reset"}
+
+    assert extract_api_error_context(_account_429(headers))["reset_at"] == pytest.approx(1794164400, abs=0.5)
+
+
+def test_unified_epoch_resets_are_instants_not_durations(monkeypatch):
+    """A bare number in a unified reset is an epoch: read as a duration it lands in 2083."""
+    monkeypatch.setattr(time, "time", lambda: _PROBE_AT)
+    # No window status names the binding one, so the earliest future window still wins.
+    headers = {
+        "anthropic-ratelimit-unified-status": "blocked",
+        "anthropic-ratelimit-unified-5h-reset": str(int(_PROBE_AT) + 600),
+        "anthropic-ratelimit-unified-7d-reset": str(int(_PROBE_AT) + 86400),
+    }
+
+    assert extract_api_error_context(_account_429(headers))["reset_at"] == pytest.approx(_PROBE_AT + 600, abs=0.5)
